@@ -3,22 +3,26 @@ const { Client, GatewayIntentBits } = require('discord.js');
 const { google } = require('googleapis');
 const cron = require('node-cron');
 
+// 0) Tu mapa de nombres a IDs
+// mappings.json debe tener algo como:
+// { "Maria": "123…", "Juan": "456…", "Pedro": "789…" }
+const nameToId = require('./mappings.json');
+
 const {
   DISCORD_TOKEN,
   DISCORD_CHANNEL_ID,
   GOOGLE_SPREADSHEET_ID,
   GOOGLE_SERVICE_ACCOUNT_CREDENTIALS,
-  SHEET_RANGE,      // ej. "Actividades!B2:I"
-  TIMEZONE,         // "America/Mexico_City"
-  CRON_SCHEDULE     // "0 8 * * *"
+  SHEET_RANGE,    // ej. "Actividades!B2:I"
+  TIMEZONE,       // "America/Mexico_City"
+  CRON_SCHEDULE   // "0 8 * * *"
 } = process.env;
 
-// 1) Inicializa el cliente de Discord
 const client = new Client({
   intents: [ GatewayIntentBits.Guilds ]
 });
 
-// 2) Lee el sheet y devuelve array de objetos { actividad, encargadoId }
+// Lee el sheet y devuelve [{ actividad, encargadoIds: [...] }, …]
 async function fetchTareasHoy() {
   const auth = new google.auth.GoogleAuth({
     keyFile: GOOGLE_SERVICE_ACCOUNT_CREDENTIALS,
@@ -35,39 +39,57 @@ async function fetchTareasHoy() {
 
   const tareas = [];
   for (const row of filas) {
-    // Asegura al menos 8 columnas para B→I
     while (row.length < 8) row.push('');
-    const rawDate = row[7].trim();     // Columna I
+    // Fecha en DD/MM/YYYY en columna I (índice 7)
+    const rawDate = row[7].trim();
     if (!rawDate) continue;
-
-    const partes = rawDate.split('/');
-    if (partes.length !== 3) continue;
-    const [d, m, a] = partes.map(n => parseInt(n, 10));
-    const fecha = new Date(a, m - 1, d);
+    const parts = rawDate.split('/');
+    if (parts.length !== 3) continue;
+    const [d, m, a] = parts.map(x => parseInt(x,10));
+    const fecha = new Date(a, m-1, d);
     fecha.setHours(0,0,0,0);
     if (fecha.getTime() !== hoy.getTime()) continue;
 
-    const actividad   = row[0].trim();  // Columna B
-    const encargadoId = row[6].trim();  // Columna H
+    // Actividad en B (índice 0)
+    const actividad = row[0].trim();
+    if (!actividad) continue;
 
-    if (actividad && encargadoId) {
-      tareas.push({ actividad, encargadoId });
+    // VARIOS nombres en H (índice 6), separados por comas
+    const rawEncargados = row[6];
+    const nombres = rawEncargados
+      .split(',')
+      .map(n => n.trim())
+      .filter(Boolean);
+
+    // Traducir nombres a IDs
+    const encargadoIds = nombres
+      .map(n => nameToId[n])
+      .filter(Boolean);
+
+    if (encargadoIds.length === 0) {
+      console.warn(`⚠️ No encontré IDs para [${nombres.join(', ')}]`);
+      continue;
     }
+
+    tareas.push({ actividad, encargadoIds });
   }
 
   return tareas;
 }
 
-// 3) Envía el mensaje mencionando a cada encargado
+// Envía el mensaje con todos los responsables
 async function sendTareas() {
   try {
     const tareas = await fetchTareasHoy();
     if (tareas.length === 0) return;
 
     const fechaLegible = new Date().toLocaleDateString('es-MX');
-    const lines = tareas.map(t =>
-      `• <@${t.encargadoId}> ${t.actividad}`
-    );
+    const lines = tareas.map(({ actividad, encargadoIds }) => {
+      const mentions = encargadoIds
+        .map(id => `<@${id}>`)
+        .join(', ');
+      return `• ${actividad}: ${mentions}`;
+    });
 
     const mensaje = `📋 **Actividades para ${fechaLegible}**\n` +
                     lines.join('\n');
@@ -80,14 +102,13 @@ async function sendTareas() {
   }
 }
 
-// 4) Al conectar, programa el cron
 client.once('ready', () => {
   console.log(`Conectado como ${client.user.tag}`);
   cron.schedule(CRON_SCHEDULE, sendTareas, { timezone: TIMEZONE });
 });
 
-// 5) Arranca el bot
 client.login(DISCORD_TOKEN);
+
 
 
 
