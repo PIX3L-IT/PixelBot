@@ -93,9 +93,12 @@ async function sendTareas() {
     const { tasksToday, tasksPending } = await fetchTareas();
     if (!tasksToday.length && !tasksPending.length) return;
 
+    // Ordenar pendientes de más antiguo a más reciente
+    tasksPending.sort((a, b) => a.fecha - b.fecha);
+
     const fechaLegible = new Date().toLocaleDateString('es-MX');
     const lines = [
-      `**📋 Actividades para ${fechaLegible}**`
+      `📋 Actividades para ${fechaLegible}`
     ];
 
     // Hoy
@@ -106,7 +109,7 @@ async function sendTareas() {
 
     // Pendientes
     if (tasksPending.length) {
-      lines.push('**⏳ Actividades pendientes:**');
+      lines.push('⏳ Pendientes:');
       for (const t of tasksPending) {
         const mentions = t.encargadoIds.map(id => `<@${id}>`).join(', ');
         const fechaAnt = t.fecha.toLocaleDateString('es-MX');
@@ -122,6 +125,7 @@ async function sendTareas() {
     console.error('Error al enviar tareas:', err);
   }
 }
+
 
 // 3) Al iniciar el bot, programa el cron
 client.once('ready', () => {
