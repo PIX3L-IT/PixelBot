@@ -233,9 +233,9 @@ client.login(DISCORD_TOKEN);
   */
 
 
-await canal.send({
+/* await canal.send({
   content: '¡Aquí va un GIF de celebración!',
   embeds: [{
     image: { url: gifUrl }
   }]
-});
+}); */
