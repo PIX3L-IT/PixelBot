@@ -14,7 +14,10 @@ const {
   CRON_SCHEDULE,   // "0 8 * * *"
   POCHARIA_SHEET_ID,
   POCHARIA_SHEET_RANGE,
-  POCHARIA_CHANNEL_ID
+  POCHARIA_CHANNEL_ID,
+  TUBOS_SHEET_ID,
+  TUBOS_SHEET_RANGE,
+  TUBOS_CHANNEL_ID
 } = process.env;
 
 // Lista de grupos de CMMI
@@ -276,6 +279,108 @@ async function sendPocharia() {
 }
 
 
+// Mensaje de Tubos
+async function fetchTubos() {
+  const auth   = new google.auth.GoogleAuth({
+    keyFile:   GOOGLE_SERVICE_ACCOUNT_CREDENTIALS,
+    scopes:    ['https://www.googleapis.com/auth/spreadsheets.readonly']
+  });
+  const sheets = google.sheets({ version: 'v4', auth });
+  const res    = await sheets.spreadsheets.values.get({
+    spreadsheetId: TUBOS_SHEET_ID,
+    range:         TUBOS_SHEET_RANGE  // "Construcción!C2:Q"
+  });
+  const filas = res.data.values || [];
+  const hoy   = new Date(); hoy.setHours(0,0,0,0);
+
+  const today   = [];
+  const pending = [];
+
+  for (const row of filas) {
+    // Aseguramos al menos 15 columnas (C→Q)
+    while (row.length < 15) row.push('');
+
+    const actividad = row[0].trim();            // C
+    if (!actividad) continue;
+
+    const nombres = row[6].split(',')           // I
+      .map(s => s.trim()).filter(Boolean);
+    const ids     = nombres
+      .map(n => nameToId[n])
+      .filter(Boolean);
+
+    // Fecha planeada en K (idx 8)
+    const parts = row[8].trim().split('/');
+    if (parts.length !== 3) continue;
+    const [d,m,y] = parts.map(n=>parseInt(n,10));
+    const fecha   = new Date(y,m-1,d);
+    fecha.setHours(0,0,0,0);
+
+    // Estado en Q (idx 14)
+    const estado = row[14].trim().toLowerCase();
+
+    if (fecha.getTime() === hoy.getTime() && estado === 'no realizado') {
+      today.push({ actividad, nombres, ids });
+    } else if (fecha.getTime() < hoy.getTime() && estado === 'no realizado') {
+      pending.push({ actividad, nombres, ids, fecha });
+    }
+  }
+
+  return { today, pending };
+}
+
+// Envía el mensaje de Tubos
+async function sendTubos() {
+  const { today, pending } = await fetchTubos();
+  if (!today.length && !pending.length) return;
+
+  // ordenar pendientes
+  pending.sort((a,b)=> a.fecha - b.fecha);
+
+  const fechaLegible = new Date().toLocaleDateString('es-MX');
+  const lines = [`📋 Actividades Tubos para ${fechaLegible}`];
+
+  // Hoy
+  for (const t of today) {
+    let mention;
+    if (!t.nombres.length)        mention = 'SIN ASIGNAR';
+    else if (!t.ids.length)       mention = 'CHECAR PVG, FORMATO INCORRECTO';
+    else                          mention = t.ids.map(id=>`<@${id}>`).join(', ');
+    lines.push(`• ${t.actividad}: ${mention}`);
+  }
+
+  // Pendientes
+  if (pending.length) {
+    lines.push('⏳ Pendientes:');
+    for (const t of pending) {
+      let mention;
+      if (!t.nombres.length)  mention = 'SIN ASIGNAR';
+      else if (!t.ids.length) mention = 'CHECAR PVG, FORMATO INCORRECTO';
+      else                     mention = t.ids.map(id=>`<@${id}>`).join(', ');
+      const fechaAnt = t.fecha.toLocaleDateString('es-MX');
+      lines.push(`• ${t.actividad}: ${mention} - ${fechaAnt}`);
+    }
+  }
+
+  // trocear chunks ≤2000
+  const canal = await client.channels.fetch(TUBOS_CHANNEL_ID);
+  const chunks = [];
+  let chunk = '';
+  for (const l of lines) {
+    if ((chunk+'\n'+l).length>2000) {
+      chunks.push(chunk);
+      chunk = l;
+    } else {
+      chunk = chunk? chunk+'\n'+l : l;
+    }
+  }
+  if (chunk) chunks.push(chunk);
+
+  for (const msg of chunks) {
+    await canal.send({ content: msg });
+  }
+}
+
 
 
 // 3) Programa el cron cuando el bot esté listo
@@ -284,6 +389,7 @@ client.once('ready', () => {
   cron.schedule(CRON_SCHEDULE, async () => {
     await sendTareas();
     await sendPocharia();
+    await sendTubos();
   }, { timezone: TIMEZONE });
 });
 
