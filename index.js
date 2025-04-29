@@ -7,443 +7,252 @@ const nameToId                     = require('./mappings.json');
 const {
   DISCORD_TOKEN,
   DISCORD_CHANNEL_ID,
+  // Departamento
   GOOGLE_SPREADSHEET_ID,
-  GOOGLE_SERVICE_ACCOUNT_CREDENTIALS,
-  SHEET_RANGE,          // e.g. "Actividades!A2:N"
-  TIMEZONE,             // "America/Mexico_City"
-  CRON_SCHEDULE,        // "0 8 * * *"
+  SHEET_RANGE,         // e.g. "Actividades!A2:N"
+  // Pocharia
   POCHARIA_SHEET_ID,
-  POCHARIA_SHEET_RANGE, 
+  POCHARIA_SHEET_RANGE,
   POCHARIA_CHANNEL_ID,
+  // Tubos
   TUBOS_SHEET_ID,
-  TUBOS_SHEET_RANGE,    
+  TUBOS_SHEET_RANGE,
   TUBOS_CHANNEL_ID,
+  // Fisio
   FISIO_SHEET_ID,
   FISIO_SHEET_RANGE,
-  FISIO_CHANNEL_ID
+  FISIO_CHANNEL_ID,
+  // Credenciales + Cron
+  GOOGLE_SERVICE_ACCOUNT_CREDENTIALS,
+  TIMEZONE,
+  CRON_SCHEDULE
 } = process.env;
 
-// Grupos CMMI
+const client = new Client({ intents: [ GatewayIntentBits.Guilds ] });
+
+// Grupos CMMI en orden (incluye "Departamento" al final)
 const GROUPS = [
   "RM","PP","PMC","M&A","PPQA","CM","RD","TS","PI",
   "VER","VAL","OPF","OPD","OT","IPM","RKM","DAR","REQM","Departamento"
 ];
-const groupMap = GROUPS.reduce((m, g) => {
-  m[g.toUpperCase()] = g;
-  return m;
-}, {});
 
-// Cliente Discord
-const client = new Client({ intents: [ GatewayIntentBits.Guilds ] });
-
-// Función genérica para extraer IDs buscándolos en el texto completo
+// Extrae todos los IDs cuyo nombre aparece en el texto
 function extractIdsFromCell(text) {
   const ids = [];
   for (const [name, id] of Object.entries(nameToId)) {
-    if (text.includes(name)) {
-      ids.push(id);
-    }
+    if (text.includes(name)) ids.push(id);
   }
-  return Array.from(new Set(ids));
+  return [...new Set(ids)];
 }
 
-// 1) Tareas departamento
-async function fetchTareas() {
+// Helper genérico para Pocharia, Tubos y Fisio
+async function sendGeneric(title, sheetId, range, colAct, colEnc, colDate, colStatus, channelId) {
+  // igual que antes...
   const auth   = new google.auth.GoogleAuth({
     keyFile: GOOGLE_SERVICE_ACCOUNT_CREDENTIALS,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly']
+    scopes:  ['https://www.googleapis.com/auth/spreadsheets.readonly']
+  });
+  const sheets = google.sheets({ version: 'v4', auth });
+  const res    = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range });
+  const rows   = res.data.values || [];
+  const todayDate = new Date(); todayDate.setHours(0,0,0,0);
+
+  const today   = [];
+  const pending = [];
+  for (const row of rows) {
+    while (row.length <= Math.max(colAct, colEnc, colDate, colStatus)) row.push('');
+    const actividad = row[colAct].trim();
+    if (!actividad) continue;
+    const ids = extractIdsFromCell(row[colEnc]||'');
+    const parts = (row[colDate].trim()||'').split('/');
+    if (parts.length !== 3) continue;
+    const [d,m,y] = parts.map(n=>parseInt(n,10));
+    const fecha = new Date(y,m-1,d); fecha.setHours(0,0,0,0);
+    const estado = (row[colStatus]||'').trim().toLowerCase();
+    if (estado !== 'no realizado') continue;
+    if (fecha.getTime() === todayDate.getTime()) today.push({ actividad, ids, fecha });
+    else if (fecha < todayDate) pending.push({ actividad, ids, fecha });
+  }
+  pending.sort((a,b)=>a.fecha - b.fecha);
+
+  const fechaLegible = new Date().toLocaleDateString('es-MX');
+  const header = `📋 **${title} — ${fechaLegible}**`;
+  const lines  = [ header, '' ];
+
+  // Función para agrupar por IDs
+  const groupByIds = arr => {
+    const m = new Map();
+    for (const t of arr) {
+      const key = t.ids.length
+        ? t.ids.map(id=>`<@${id}>`).join(', ')
+        : 'SIN_ASIGNAR';
+      if (!m.has(key)) m.set(key, []);
+      m.get(key).push(t);
+    }
+    return m;
+  };
+
+  // Hoy
+  const mapHoy = groupByIds(today);
+  for (const [key, tasks] of mapHoy) {
+    const titleKey = key === 'SIN_ASIGNAR'
+      ? '**SIN ASIGNAR**'
+      : key;
+    lines.push(titleKey);
+    for (const t of tasks) {
+      lines.push(`• ${t.actividad}`);
+    }
+    lines.push('');
+  }
+
+  // Pendientes
+  if (pending.length) {
+    lines.push('⌛ **Pendientes:**', '');
+    const mapPen = groupByIds(pending);
+    for (const [key, tasks] of mapPen) {
+      const titleKey = key === 'SIN_ASIGNAR'
+        ? '**SIN ASIGNAR**'
+        : key;
+      lines.push(titleKey);
+      for (const t of tasks) {
+        const ds = t.fecha.toLocaleDateString('es-MX');
+        lines.push(`• ${t.actividad} — ${ds}`);
+      }
+      lines.push('');
+    }
+  }
+
+  const ch = await client.channels.fetch(channelId);
+  let chunk = '';
+  for (const l of lines) {
+    if ((chunk + '\n' + l).length > 2000) {
+      await ch.send(chunk);
+      chunk = l;
+    } else {
+      chunk = chunk ? `${chunk}\n${l}` : l;
+    }
+  }
+  if (chunk) await ch.send(chunk);
+}
+
+
+// ——— Sección DEPARTAMENTO con tu viejo formato ———
+async function sendDepartment() {
+  // 1) Leemos toda la pestaña A→N
+  const auth   = new google.auth.GoogleAuth({
+    keyFile: GOOGLE_SERVICE_ACCOUNT_CREDENTIALS,
+    scopes:  ['https://www.googleapis.com/auth/spreadsheets.readonly']
   });
   const sheets = google.sheets({ version: 'v4', auth });
   const res    = await sheets.spreadsheets.values.get({
     spreadsheetId: GOOGLE_SPREADSHEET_ID,
-    range: SHEET_RANGE
+    range: SHEET_RANGE                 // debe incluir A2:N
   });
-  const filas = res.data.values || [];
-  const hoy   = new Date(); hoy.setHours(0,0,0,0);
+  const rows = res.data.values || [];
+  const todayDate = new Date(); todayDate.setHours(0,0,0,0);
 
-  const tasksToday = [];
+  // 2) Clasificamos por grupo, hoy y pendientes
+  const tasksToday   = [];
   const tasksPending = [];
-
-  for (const row of filas) {
+  for (const row of rows) {
     while (row.length < 14) row.push('');
-    const codeCell   = row[0].trim();
-    const firstWord  = codeCell.split(' ')[0] || '';
-    const groupKey   = firstWord.toUpperCase();
-    const group      = groupMap[groupKey] || 'Otros';
+    const codeCell  = row[0].trim();
+    const grpKey    = codeCell.split(' ')[0].toUpperCase();
+    const group     = GROUPS.includes(grpKey) ? grpKey : 'Departamento';
 
-    const actividad  = row[1].trim();
+    const actividad = row[1].trim();
     if (!actividad) continue;
 
-    // Extraer IDs sin importar comas ni separadores
-    const rawEnc     = row[7] || '';
-    const encargadoIds = extractIdsFromCell(rawEnc);
-
-    const rawDate    = row[8].trim();
-    if (!rawDate) continue;
-    const parts      = rawDate.split('/');
+    const ids = extractIdsFromCell(row[7]||'');
+    const parts = (row[8].trim()||'').split('/');
     if (parts.length !== 3) continue;
-    const [d,m,y]    = parts.map(n => parseInt(n,10));
-    const fecha      = new Date(y, m-1, d);
-    fecha.setHours(0,0,0,0);
+    const [d,m,y] = parts.map(n=>parseInt(n,10));
+    const fecha = new Date(y,m-1,d); fecha.setHours(0,0,0,0);
+    const estado = (row[13]||'').trim().toLowerCase();
+    if (estado !== 'no realizado') continue;
 
-    const estado     = (row[13] || '').trim().toLowerCase();
-
-    if (fecha.getTime() === hoy.getTime() && estado === 'no realizado') {
-      tasksToday.push({ group, actividad, encargadoIds });
-    } else if (fecha.getTime() < hoy.getTime() && estado === 'no realizado') {
-      tasksPending.push({ group, actividad, encargadoIds, fecha });
-    }
+    const obj = { group, actividad, ids, fecha };
+    if (fecha.getTime() === todayDate.getTime()) tasksToday.push(obj);
+    else if (fecha < todayDate)                  tasksPending.push(obj);
   }
 
-  return { tasksToday, tasksPending };
-}
+  // 3) Armar líneas
+  const fechaLegible = new Date().toLocaleDateString('es-MX');
+  const lines = [
+    `📋 **Actividades para ${fechaLegible}**`,
+    ''
+  ];
 
-async function sendTareas() {
-  try {
-    const { tasksToday, tasksPending } = await fetchTareas();
-    if (!tasksToday.length && !tasksPending.length) return;
-
-    tasksPending.sort((a,b) => a.fecha - b.fecha);
-
-    const fechaLegible = new Date().toLocaleDateString('es-MX');
-    const lines = [`📋 Actividades para ${fechaLegible}`];
-
-    // Hoy
-    for (const group of [...GROUPS, 'Otros']) {
-      const hoyGroup = tasksToday.filter(t => t.group === group);
-      if (!hoyGroup.length) continue;
-      lines.push(`**${group}**`);
-      for (const t of hoyGroup) {
-        const mentions = t.encargadoIds.length
-          ? t.encargadoIds.map(id => `<@${id}>`).join(', ')
-          : 'SIN ASIGNAR';
-        lines.push(`• ${t.actividad}: ${mentions}`);
-      }
-    }
-    // Pendientes
-    if (tasksPending.length) {
-      lines.push('⏳ Pendientes:');
-      for (const group of [...GROUPS, 'Otros']) {
-        const pendGroup = tasksPending.filter(t => t.group === group);
-        if (!pendGroup.length) continue;
-        lines.push(`**${group}**`);
-        for (const t of pendGroup) {
-          const mentions = t.encargadoIds.length
-            ? t.encargadoIds.map(id => `<@${id}>`).join(', ')
-            : 'SIN ASIGNAR';
-          const fechaAnt = t.fecha.toLocaleDateString('es-MX');
-          lines.push(`• ${t.actividad}: ${mentions} - ${fechaAnt}`);
-        }
-      }
-    }
-
-    const canal = await client.channels.fetch(DISCORD_CHANNEL_ID);
-    const chunks = [];
-    let chunk = '';
-    for (const l of lines) {
-      if ((chunk + '\n' + l).length > 2000) {
-        chunks.push(chunk);
-        chunk = l;
-      } else {
-        chunk = chunk ? chunk + '\n' + l : l;
-      }
-    }
-    if (chunk) chunks.push(chunk);
-    for (const msg of chunks) await canal.send({ content: msg });
-    console.log('Tareas enviadas en', chunks.length, 'mensajes');
-  } catch (err) {
-    console.error('Error en sendTareas:', err);
-  }
-}
-
-// 2) Pocharia 
-async function fetchPocharia() {
-  const auth   = new google.auth.GoogleAuth({
-    keyFile: GOOGLE_SERVICE_ACCOUNT_CREDENTIALS,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly']
-  });
-  const sheets = google.sheets({ version: 'v4', auth });
-  const res    = await sheets.spreadsheets.values.get({
-    spreadsheetId: POCHARIA_SHEET_ID,
-    range: POCHARIA_SHEET_RANGE
-  });
-  const filas = res.data.values || [];
-  const hoy   = new Date(); hoy.setHours(0,0,0,0);
-
-  const today = [], pending = [];
-  for (const row of filas) {
-    while (row.length < 15) row.push('');
-    const actividad = row[0].trim();
-    if (!actividad) continue;
-
-    const rawEnc    = row[6] || '';
-    const ids       = extractIdsFromCell(rawEnc);
-
-    const parts     = row[8].trim().split('/');
-    if (parts.length !== 3) continue;
-    const [d,m,y]   = parts.map(n=>parseInt(n,10));
-    const fecha     = new Date(y,m-1,d);
-    fecha.setHours(0,0,0,0);
-
-    const estado    = row[14].trim().toLowerCase();
-    if (fecha.getTime() === hoy.getTime() && estado === 'no realizado') {
-      today.push({ actividad, ids });
-    } else if (fecha.getTime() < hoy.getTime() && estado === 'no realizado') {
-      pending.push({ actividad, ids, fecha });
-    }
-  }
-  return { today, pending };
-}
-
-async function sendPocharia() {
-  try {
-    const { today, pending } = await fetchPocharia();
-    if (!today.length && !pending.length) return;
-
-    pending.sort((a,b) => a.fecha - b.fecha);
-    const fechaLegible = new Date().toLocaleDateString('es-MX');
-    const lines = [`📋 Actividades Pocharia para ${fechaLegible}`];
-
-    for (const t of today) {
-      const mentions = t.ids.length
-        ? t.ids.map(id => `<@${id}>`).join(', ')
+  // HOY
+  for (const grp of GROUPS) {
+    const items = tasksToday.filter(t => t.group === grp);
+    if (!items.length) continue;
+    lines.push(grp);
+    for (const t of items) {
+      const ment = t.ids.length
+        ? t.ids.map(id=>`<@${id}>`).join(', ')
         : 'SIN ASIGNAR';
-      lines.push(`• ${t.actividad}: ${mentions}`);
+      lines.push(`• ${t.actividad}: ${ment}`);
     }
-    if (pending.length) {
-      lines.push('⏳ Pendientes:');
-      for (const t of pending) {
-        const mentions = t.ids.length
-          ? t.ids.map(id => `<@${id}>`).join(', ')
+    lines.push('');
+  }
+
+  // PENDIENTES
+  if (tasksPending.length) {
+    lines.push('⏳ Pendientes:', '');
+    for (const grp of GROUPS) {
+      const items = tasksPending.filter(t => t.group === grp);
+      if (!items.length) continue;
+      lines.push(grp);
+      for (const t of items) {
+        const ment = t.ids.length
+          ? t.ids.map(id=>`<@${id}>`).join(', ')
           : 'SIN ASIGNAR';
-        const fechaAnt = t.fecha.toLocaleDateString('es-MX');
-        lines.push(`• ${t.actividad}: ${mentions} - ${fechaAnt}`);
+        const ds = t.fecha.toLocaleDateString('es-MX');
+        lines.push(`• ${t.actividad}: ${ment} - ${ds}`);
       }
-    }
-
-    const canal = await client.channels.fetch(POCHARIA_CHANNEL_ID);
-    const chunks = [], max = 2000;
-    let chunk = '';
-    for (const l of lines) {
-      if ((chunk + '\n' + l).length > max) {
-        chunks.push(chunk);
-        chunk = l;
-      } else {
-        chunk = chunk ? chunk + '\n' + l : l;
-      }
-    }
-    if (chunk) chunks.push(chunk);
-    for (const msg of chunks) await canal.send({ content: msg });
-    console.log('Pocharia enviada en', chunks.length, 'mensajes');
-  } catch (err) {
-    console.error('Error en sendPocharia:', err);
-  }
-}
-
-// 3) Tubos 
-async function fetchTubos() {
-  const auth   = new google.auth.GoogleAuth({
-    keyFile: GOOGLE_SERVICE_ACCOUNT_CREDENTIALS,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly']
-  });
-  const sheets = google.sheets({ version: 'v4', auth });
-  const res    = await sheets.spreadsheets.values.get({
-    spreadsheetId: TUBOS_SHEET_ID,
-    range: TUBOS_SHEET_RANGE
-  });
-  const filas = res.data.values || [];
-  const hoy   = new Date(); hoy.setHours(0,0,0,0);
-
-  const today = [], pending = [];
-  for (const row of filas) {
-    while (row.length < 15) row.push('');
-    const actividad = row[0].trim();
-    if (!actividad) continue;
-
-    const rawEnc    = row[6] || '';
-    const ids       = extractIdsFromCell(rawEnc);
-
-    const parts     = row[8].trim().split('/');
-    if (parts.length !== 3) continue;
-    const [d,m,y]   = parts.map(n=>parseInt(n,10));
-    const fecha     = new Date(y,m-1,d);
-    fecha.setHours(0,0,0,0);
-
-    const estado    = row[14].trim().toLowerCase();
-    if (fecha.getTime() === hoy.getTime() && estado === 'no realizado') {
-      today.push({ actividad, ids });
-    } else if (fecha.getTime() < hoy.getTime() && estado === 'no realizado') {
-      pending.push({ actividad, ids, fecha });
+      lines.push('');
     }
   }
-  return { today, pending };
-}
 
-async function sendTubos() {
-  try {
-    const { today, pending } = await fetchTubos();
-    if (!today.length && !pending.length) return;
-
-    pending.sort((a,b) => a.fecha - b.fecha);
-    const fechaLegible = new Date().toLocaleDateString('es-MX');
-    const lines = [`📋 Actividades Tubos para ${fechaLegible}`];
-
-    for (const t of today) {
-      const mentions = t.ids.length
-        ? t.ids.map(id => `<@${id}>`).join(', ')
-        : 'SIN ASIGNAR';
-      lines.push(`• ${t.actividad}: ${mentions}`);
-    }
-    if (pending.length) {
-      lines.push('⏳ Pendientes:');
-      for (const t of pending) {
-        const mentions = t.ids.length
-          ? t.ids.map(id => `<@${id}>`).join(', ')
-          : 'SIN ASIGNAR';
-        const fechaAnt = t.fecha.toLocaleDateString('es-MX');
-        lines.push(`• ${t.actividad}: ${mentions} - ${fechaAnt}`);
-      }
-    }
-
-    const canal = await client.channels.fetch(TUBOS_CHANNEL_ID);
-    const chunks = [], max = 2000;
-    let chunk = '';
-    for (const l of lines) {
-      if ((chunk + '\n' + l).length > max) {
-        chunks.push(chunk);
-        chunk = l;
-      } else {
-        chunk = chunk ? chunk + '\n' + l : l;
-      }
-    }
-    if (chunk) chunks.push(chunk);
-    for (const msg of chunks) await canal.send({ content: msg });
-    console.log('Tubos enviada en', chunks.length, 'mensajes');
-  } catch (err) {
-    console.error('Error en sendTubos:', err);
-  }
-}
-
-// 4) Fisio
-async function fetchFisio() {
-  const auth   = new google.auth.GoogleAuth({
-    keyFile:   GOOGLE_SERVICE_ACCOUNT_CREDENTIALS,
-    scopes:    ['https://www.googleapis.com/auth/spreadsheets.readonly']
-  });
-  const sheets = google.sheets({ version: 'v4', auth });
-  const res    = await sheets.spreadsheets.values.get({
-    spreadsheetId: FISIO_SHEET_ID,
-    range:         FISIO_SHEET_RANGE  // e.g. "Fisio!A2:Q"
-  });
-  const filas = res.data.values || [];
-  const hoy   = new Date(); hoy.setHours(0,0,0,0);
-
-  const today   = [];
-  const pending = [];
-
-  for (const row of filas) {
-    // Aseguramos al menos 17 columnas (A→Q)
-    while (row.length < 17) row.push('');
-
-    // Actividad: col A (idx 0)
-    const actividad = row[0].trim();
-    if (!actividad) continue;
-
-    // Encargados: col I (idx 8)
-    const rawEncarios = row[8] || '';
-    const ids         = extractIdsFromCell(rawEncarios);
-
-    // Fecha planeada: col K (idx 10) en DD/MM/YYYY
-    const rawDate = row[10].trim();
-    if (!rawDate) continue;
-    const parts   = rawDate.split('/');
-    if (parts.length !== 3) continue;
-    const [d,m,y] = parts.map(n => parseInt(n, 10));
-    const fecha   = new Date(y, m - 1, d);
-    fecha.setHours(0,0,0,0);
-
-    // Estado: col Q (idx 16)
-    const estado  = row[16].trim().toLowerCase();
-
-    if (fecha.getTime() === hoy.getTime() && estado === 'no realizado') {
-      today.push({ actividad, ids });
-    } else if (fecha.getTime() < hoy.getTime() && estado === 'no realizado') {
-      pending.push({ actividad, ids, fecha });
+  // 4) Enviar en chunks
+  const ch = await client.channels.fetch(DISCORD_CHANNEL_ID);
+  let chunk = '';
+  for (const l of lines) {
+    if ((chunk + '\n' + l).length > 2000) {
+      await ch.send(chunk);
+      chunk = l;
+    } else {
+      chunk = chunk ? `${chunk}\n${l}` : l;
     }
   }
-  return { today, pending };
+  if (chunk) await ch.send(chunk);
 }
 
-async function sendFisio() {
-  try {
-    const { today, pending } = await fetchFisio();
-    if (!today.length && !pending.length) return;
-
-    // Ordena pendientes de más antiguas a más recientes
-    pending.sort((a,b) => a.fecha - b.fecha);
-
-    const fechaLegible = new Date().toLocaleDateString('es-MX');
-    const lines = [`📋 Actividades Fisio para ${fechaLegible}`];
-
-    // Hoy
-    for (const t of today) {
-      const mentions = t.ids.length
-        ? t.ids.map(id => `<@${id}>`).join(', ')
-        : 'SIN ASIGNAR';
-      lines.push(`• ${t.actividad}: ${mentions}`);
-    }
-
-    // Pendientes
-    if (pending.length) {
-      lines.push('⏳ Pendientes:');
-      for (const t of pending) {
-        const mentions = t.ids.length
-          ? t.ids.map(id => `<@${id}>`).join(', ')
-          : 'SIN ASIGNAR';
-        const fechaAnt = t.fecha.toLocaleDateString('es-MX');
-        lines.push(`• ${t.actividad}: ${mentions} - ${fechaAnt}`);
-      }
-    }
-
-    // Trocea en mensajes ≤2000 caracteres
-    const canal = await client.channels.fetch(FISIO_CHANNEL_ID);
-    const chunks = [];
-    let chunk = '';
-    for (const line of lines) {
-      if ((chunk + '\n' + line).length > 2000) {
-        chunks.push(chunk);
-        chunk = line;
-      } else {
-        chunk = chunk ? chunk + '\n' + line : line;
-      }
-    }
-    if (chunk) chunks.push(chunk);
-
-    // Envío
-    for (const msg of chunks) {
-      await canal.send({ content: msg });
-    }
-    console.log('Fisio enviada en', chunks.length, 'mensajes');
-  } catch (err) {
-    console.error('Error en sendFisio:', err);
-  }
-}
-
-
-// 5) Cron al iniciar
+// ——— Cron y arranque ———
 client.once('ready', () => {
   console.log(`Conectado como ${client.user.tag}`);
   cron.schedule(CRON_SCHEDULE, async () => {
-    await sendTareas();
-    await sendPocharia();
-    await sendTubos();
-    await sendFisio();
+    await sendDepartment();
+    await sendGeneric(
+      'Actividades Pocharia',
+      POCHARIA_SHEET_ID, POCHARIA_SHEET_RANGE,
+      0,6,8,14, POCHARIA_CHANNEL_ID
+    );
+    await sendGeneric(
+      'Actividades Tubos',
+      TUBOS_SHEET_ID, TUBOS_SHEET_RANGE,
+      0,6,8,14, TUBOS_CHANNEL_ID
+    );
+    await sendGeneric(
+      'Actividades Fisio',
+      FISIO_SHEET_ID, FISIO_SHEET_RANGE,
+      0,8,10,16, FISIO_CHANNEL_ID
+    );
   }, { timezone: TIMEZONE });
 });
 
-// 5) Login
 client.login(DISCORD_TOKEN);
-
 
 
 
