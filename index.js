@@ -13,11 +13,14 @@ const {
   TIMEZONE,             // "America/Mexico_City"
   CRON_SCHEDULE,        // "0 8 * * *"
   POCHARIA_SHEET_ID,
-  POCHARIA_SHEET_RANGE, // e.g. "Construcción!C2:Q"
+  POCHARIA_SHEET_RANGE, 
   POCHARIA_CHANNEL_ID,
   TUBOS_SHEET_ID,
-  TUBOS_SHEET_RANGE,    // e.g. "Tubos!C2:Q"
-  TUBOS_CHANNEL_ID
+  TUBOS_SHEET_RANGE,    
+  TUBOS_CHANNEL_ID,
+  FISIO_SHEET_ID,
+  FISIO_SHEET_RANGE,
+  FISIO_CHANNEL_ID
 } = process.env;
 
 // Grupos CMMI
@@ -153,7 +156,7 @@ async function sendTareas() {
   }
 }
 
-// 2) Pocharia (similar, sin agrupar)
+// 2) Pocharia 
 async function fetchPocharia() {
   const auth   = new google.auth.GoogleAuth({
     keyFile: GOOGLE_SERVICE_ACCOUNT_CREDENTIALS,
@@ -237,7 +240,7 @@ async function sendPocharia() {
   }
 }
 
-// 3) Tubos (idéntico a Pocharia)
+// 3) Tubos 
 async function fetchTubos() {
   const auth   = new google.auth.GoogleAuth({
     keyFile: GOOGLE_SERVICE_ACCOUNT_CREDENTIALS,
@@ -321,13 +324,120 @@ async function sendTubos() {
   }
 }
 
-// 4) Cron al iniciar
+// 4) Fisio
+async function fetchFisio() {
+  const auth   = new google.auth.GoogleAuth({
+    keyFile:   GOOGLE_SERVICE_ACCOUNT_CREDENTIALS,
+    scopes:    ['https://www.googleapis.com/auth/spreadsheets.readonly']
+  });
+  const sheets = google.sheets({ version: 'v4', auth });
+  const res    = await sheets.spreadsheets.values.get({
+    spreadsheetId: FISIO_SHEET_ID,
+    range:         FISIO_SHEET_RANGE  // e.g. "Fisio!A2:Q"
+  });
+  const filas = res.data.values || [];
+  const hoy   = new Date(); hoy.setHours(0,0,0,0);
+
+  const today   = [];
+  const pending = [];
+
+  for (const row of filas) {
+    // Aseguramos al menos 17 columnas (A→Q)
+    while (row.length < 17) row.push('');
+
+    // Actividad: col A (idx 0)
+    const actividad = row[0].trim();
+    if (!actividad) continue;
+
+    // Encargados: col I (idx 8)
+    const rawEncarios = row[8] || '';
+    const ids         = extractIdsFromCell(rawEncarios);
+
+    // Fecha planeada: col K (idx 10) en DD/MM/YYYY
+    const rawDate = row[10].trim();
+    if (!rawDate) continue;
+    const parts   = rawDate.split('/');
+    if (parts.length !== 3) continue;
+    const [d,m,y] = parts.map(n => parseInt(n, 10));
+    const fecha   = new Date(y, m - 1, d);
+    fecha.setHours(0,0,0,0);
+
+    // Estado: col Q (idx 16)
+    const estado  = row[16].trim().toLowerCase();
+
+    if (fecha.getTime() === hoy.getTime() && estado === 'no realizado') {
+      today.push({ actividad, ids });
+    } else if (fecha.getTime() < hoy.getTime() && estado === 'no realizado') {
+      pending.push({ actividad, ids, fecha });
+    }
+  }
+  return { today, pending };
+}
+
+async function sendFisio() {
+  try {
+    const { today, pending } = await fetchFisio();
+    if (!today.length && !pending.length) return;
+
+    // Ordena pendientes de más antiguas a más recientes
+    pending.sort((a,b) => a.fecha - b.fecha);
+
+    const fechaLegible = new Date().toLocaleDateString('es-MX');
+    const lines = [`📋 Actividades Fisio para ${fechaLegible}`];
+
+    // Hoy
+    for (const t of today) {
+      const mentions = t.ids.length
+        ? t.ids.map(id => `<@${id}>`).join(', ')
+        : 'SIN ASIGNAR';
+      lines.push(`• ${t.actividad}: ${mentions}`);
+    }
+
+    // Pendientes
+    if (pending.length) {
+      lines.push('⏳ Pendientes:');
+      for (const t of pending) {
+        const mentions = t.ids.length
+          ? t.ids.map(id => `<@${id}>`).join(', ')
+          : 'SIN ASIGNAR';
+        const fechaAnt = t.fecha.toLocaleDateString('es-MX');
+        lines.push(`• ${t.actividad}: ${mentions} - ${fechaAnt}`);
+      }
+    }
+
+    // Trocea en mensajes ≤2000 caracteres
+    const canal = await client.channels.fetch(FISIO_CHANNEL_ID);
+    const chunks = [];
+    let chunk = '';
+    for (const line of lines) {
+      if ((chunk + '\n' + line).length > 2000) {
+        chunks.push(chunk);
+        chunk = line;
+      } else {
+        chunk = chunk ? chunk + '\n' + line : line;
+      }
+    }
+    if (chunk) chunks.push(chunk);
+
+    // Envío
+    for (const msg of chunks) {
+      await canal.send({ content: msg });
+    }
+    console.log('Fisio enviada en', chunks.length, 'mensajes');
+  } catch (err) {
+    console.error('Error en sendFisio:', err);
+  }
+}
+
+
+// 5) Cron al iniciar
 client.once('ready', () => {
   console.log(`Conectado como ${client.user.tag}`);
   cron.schedule(CRON_SCHEDULE, async () => {
     await sendTareas();
     await sendPocharia();
     await sendTubos();
+    await sendFisio();
   }, { timezone: TIMEZONE });
 });
 
