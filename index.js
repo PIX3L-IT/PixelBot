@@ -180,7 +180,7 @@ async function sendGeneric(title, sheetId, range, colAct, colEnc, colDate, colSt
     const parts = (row[colDate].trim()||'').split('/');
     if (parts.length !== 3) continue;
     const [d,m,y] = parts.map(n=>parseInt(n,10));
-    const fecha = new Date(y,m-1,d); fecha.setHours(0,0,0,0);
+    const fecha   = new Date(y,m-1,d); fecha.setHours(0,0,0,0);
 
     const estado = (row[colStatus]||'').trim().toLowerCase();
     if (estado !== 'no realizado') continue;
@@ -189,13 +189,14 @@ async function sendGeneric(title, sheetId, range, colAct, colEnc, colDate, colSt
     if (fecha.getTime() === todayDate.getTime()) today.push(task);
     else if (fecha < todayDate) pending.push(task);
   }
+
   pending.sort((a,b)=>a.fecha - b.fecha);
 
   const fechaLegible = new Date().toLocaleDateString('es-MX');
   const header = `📋 **${title} — ${fechaLegible}**`;
   const lines  = [ header, '' ];
 
-  // helper
+  // helper para agrupar por IDs
   const groupByIds = arr => {
     const m = new Map();
     for (const t of arr) {
@@ -208,24 +209,46 @@ async function sendGeneric(title, sheetId, range, colAct, colEnc, colDate, colSt
     return m;
   };
 
-  // Hoy
+  // 1) HOY — primero SIN_ASIGNAR, luego el resto
   const mapHoy = groupByIds(today);
+
+  // bloque SIN_ASIGNAR
+  if (mapHoy.has('SIN_ASIGNAR')) {
+    lines.push('**SIN ASIGNAR**');
+    for (const t of mapHoy.get('SIN_ASIGNAR')) {
+      lines.push(`• ${t.actividad}`);
+    }
+    lines.push('');
+  }
+  // luego los grupos con responsables
   for (const [key, tasks] of mapHoy) {
-    const titleKey = key === 'SIN_ASIGNAR' ? '**SIN ASIGNAR**' : key;
-    lines.push(titleKey);
+    if (key === 'SIN_ASIGNAR') continue;
+    lines.push(key);
     for (const t of tasks) {
       lines.push(`• ${t.actividad}`);
     }
     lines.push('');
   }
 
-  // Pendientes
+  // 2) PENDIENTES — mismo patrón
   if (pending.length) {
     lines.push('⌛ **Pendientes:**', '');
+
     const mapPen = groupByIds(pending);
+
+    // primero SIN_ASIGNAR
+    if (mapPen.has('SIN_ASIGNAR')) {
+      lines.push('**SIN ASIGNAR**');
+      for (const t of mapPen.get('SIN_ASIGNAR')) {
+        const ds = t.fecha.toLocaleDateString('es-MX');
+        lines.push(`• ${t.actividad} — ${ds}`);
+      }
+      lines.push('');
+    }
+    // luego el resto
     for (const [key, tasks] of mapPen) {
-      const titleKey = key === 'SIN_ASIGNAR' ? '**SIN ASIGNAR**' : key;
-      lines.push(titleKey);
+      if (key === 'SIN_ASIGNAR') continue;
+      lines.push(key);
       for (const t of tasks) {
         const ds = t.fecha.toLocaleDateString('es-MX');
         lines.push(`• ${t.actividad} — ${ds}`);
@@ -234,19 +257,19 @@ async function sendGeneric(title, sheetId, range, colAct, colEnc, colDate, colSt
     }
   }
 
-  const ch = await client.channels.fetch(channelId);
+  // 3) Envío en bloques ≤2000 chars
+  const channel = await client.channels.fetch(channelId);
   let chunk = '';
   for (const line of lines) {
     if ((chunk + '\n' + line).length > 2000) {
-      await ch.send(chunk);
+      await channel.send(chunk);
       chunk = line;
     } else {
       chunk = chunk ? `${chunk}\n${line}` : line;
     }
   }
-  if (chunk) await ch.send(chunk);
+  if (chunk) await channel.send(chunk);
 }
-
 client.once('ready', () => {
   console.log(`Conectado como ${client.user.tag}`);
   cron.schedule(CRON_SCHEDULE, async () => {
