@@ -36,14 +36,28 @@ const CMMI_AREAS = [
   "VER","VAL","OPF","OPD","OT","IPM","RKM","DAR","REQM","Departamento"
 ];
 
-// Extrae IDs cuyo nombre aparece en el texto
+// Justo después de cargar mappings.json:
+const sortedNames = Object.keys(nameToId)
+  .sort((a, b) => b.length - a.length);  // nombres de mayor a menor longitud
+
 function extractIdsFromCell(text) {
+  let remaining = text;
   const ids = [];
-  for (const [name, id] of Object.entries(nameToId)) {
-    if (text.includes(name)) ids.push(id);
+
+  for (const name of sortedNames) {
+    const idx = remaining.indexOf(name);
+    if (idx !== -1) {
+      ids.push(nameToId[name]);
+      // Eliminamos esa ocurrencia para no volver a casarla
+      remaining = remaining.slice(0, idx)
+                + remaining.slice(idx + name.length);
+    }
   }
-  return [...new Set(ids)];
+
+  // Devolvemos únicos
+  return Array.from(new Set(ids));
 }
+
 
 // Función para enviar con el "viejo formato" agrupado por CMMI
 async function sendDepartment() {
