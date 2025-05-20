@@ -369,127 +369,148 @@ async function sendArea(area) {
 }
 
 /** ––––– Registrar comandos slash y manejarlos ––––– **/
-
 client.once('ready', async () => {
   console.log(`Conectado como ${client.user.tag}`);
 
-  // Construimos /send con subcomandos fijos + dinámicos
+  // 1) Comando /send…
   const sendBuilder = new SlashCommandBuilder()
     .setName('send')
     .setDescription('Enviar manualmente las secciones')
-    // subcomandos fijos
-    .addSubcommand(sub => sub
-      .setName('departamento')
-      .setDescription('Envía actividades Departamento'))
-    .addSubcommand(sub => sub
-      .setName('pocharia')
-      .setDescription('Envía actividades Pocharia'))
-    .addSubcommand(sub => sub
-      .setName('tubos')
-      .setDescription('Envía actividades Tubos'))
-    .addSubcommand(sub => sub
-      .setName('fisio')
-      .setDescription('Envía actividades Fisio'))
-    .addSubcommand(sub => sub
-      .setName('all')
-      .setDescription('Envía todas las secciones'));
-
-  // añadimos un subcomando por cada grupo de CMMI
+    .addSubcommand(sub => sub.setName('departamento').setDescription('Envía actividades Departamento'))
+    .addSubcommand(sub => sub.setName('pocharia')    .setDescription('Envía actividades Pocharia'))
+    .addSubcommand(sub => sub.setName('tubos')       .setDescription('Envía actividades Tubos'))
+    .addSubcommand(sub => sub.setName('fisio')       .setDescription('Envía actividades Fisio'))
+    .addSubcommand(sub => sub.setName('all')         .setDescription('Envía todas las secciones'));
   for (const g of GROUPS) {
-    if (g === 'Departamento') continue; // ya está como subcomando fijo
+    if (g === 'Departamento') continue;
     sendBuilder.addSubcommand(sub =>
-      sub
-        .setName(g.toLowerCase())
-        .setDescription(`Envía actividades ${g}`)
+      sub.setName(g.toLowerCase())
+         .setDescription(`Envía actividades ${g}`)
     );
   }
 
-  // -> Para desarrollo inmediato, registra en tu guild:
+  // 2) Comando /pending…
+  const pendingBuilder = new SlashCommandBuilder()
+    .setName('pending')
+    .setDescription('Recibe tus actividades pendientes por DM')
+    .toJSON();
+
+  // 3) Registramos ambos comandos (guild para test rápido, si existe)
+  const commands = [
+    sendBuilder.toJSON(),
+    pendingBuilder
+  ];
   const guild = client.guilds.cache.get(process.env.DISCORD_GUILD_ID);
   if (guild) {
-    await guild.commands.set([ sendBuilder.toJSON() ]);
-    console.log('Slash commands registrados en guild.');
+    await guild.commands.set(commands);
+    console.log('Slash commands (send + pending) registrados en guild.');
   } else {
-    // -> En producción, como global:
-    await client.application.commands.set([ sendBuilder.toJSON() ]);
-    console.log('Slash commands registrados globalmente.');
+    await client.application.commands.set(commands);
+    console.log('Slash commands (send + pending) registrados globalmente.');
   }
 });
 
+
+/** ––––– Manejar interacciones ––––– **/
 client.on('interactionCreate', async interaction => {
-  if (!interaction.isChatInputCommand() || interaction.commandName !== 'send') return;
+  if (!interaction.isChatInputCommand()) return;
 
-  await interaction.deferReply({ ephemeral: true });
-  const sub = interaction.options.getSubcommand();
-
-  try {
-    switch (sub) {
-      case 'departamento':
-        await sendDepartment();
-        await interaction.editReply('✅ Departamento enviado.');
-        break;
-
-      case 'pocharia':
-        await sendGeneric(
-          'Actividades Pocharia',
-          POCHARIA_SHEET_ID, POCHARIA_SHEET_RANGE,
-          0,6,8,14, POCHARIA_CHANNEL_ID
-        );
-        await interaction.editReply('✅ Pocharia enviado.');
-        break;
-
-      case 'tubos':
-        await sendGeneric(
-          'Actividades Tubos',
-          TUBOS_SHEET_ID, TUBOS_SHEET_RANGE,
-          0,6,8,14, TUBOS_CHANNEL_ID
-        );
-        await interaction.editReply('✅ Tubos enviado.');
-        break;
-
-      case 'fisio':
-        await sendGeneric(
-          'Actividades Fisio',
-          FISIO_SHEET_ID, FISIO_SHEET_RANGE,
-          0,8,10,16, FISIO_CHANNEL_ID
-        );
-        await interaction.editReply('✅ Fisio enviado.');
-        break;
-
-      case 'all':
-        await sendDepartment();
-        await sendGeneric(
-          'Actividades Pocharia',
-          POCHARIA_SHEET_ID, POCHARIA_SHEET_RANGE,
-          0,6,8,14, POCHARIA_CHANNEL_ID
-        );
-        await sendGeneric(
-          'Actividades Tubos',
-          TUBOS_SHEET_ID, TUBOS_SHEET_RANGE,
-          0,6,8,14, TUBOS_CHANNEL_ID
-        );
-        await sendGeneric(
-          'Actividades Fisio',
-          FISIO_SHEET_ID, FISIO_SHEET_RANGE,
-          0,8,10,16, FISIO_CHANNEL_ID
-        );
-        await interaction.editReply('✅ Todas las secciones enviadas.');
-        break;
-
-      default:
-        // dinámica: si coincide con uno de los GROUPS en lowercase
-        if (GROUPS.map(g => g.toLowerCase()).includes(sub)) {
-          const area = groupMap[sub.toUpperCase()] || sub;
-          await sendArea(area);
-          await interaction.editReply(`✅ ${area} enviado.`);
-        } else {
-          await interaction.editReply('❌ Subcomando no reconocido.');
-        }
+  // ——— /send ———
+  if (interaction.commandName === 'send') {
+    await interaction.deferReply({ ephemeral: true });
+    const sub = interaction.options.getSubcommand();
+    try {
+      switch (sub) {
+        case 'departamento':
+          await sendDepartment();
+          return void await interaction.editReply('✅ Departamento enviado.');
+        case 'pocharia':
+          await sendGeneric('Actividades Pocharia', POCHARIA_SHEET_ID, POCHARIA_SHEET_RANGE, 0,6,8,14, POCHARIA_CHANNEL_ID);
+          return void await interaction.editReply('✅ Pocharia enviado.');
+        case 'tubos':
+          await sendGeneric('Actividades Tubos', TUBOS_SHEET_ID, TUBOS_SHEET_RANGE, 0,6,8,14, TUBOS_CHANNEL_ID);
+          return void await interaction.editReply('✅ Tubos enviado.');
+        case 'fisio':
+          await sendGeneric('Actividades Fisio', FISIO_SHEET_ID, FISIO_SHEET_RANGE, 0,8,10,16, FISIO_CHANNEL_ID);
+          return void await interaction.editReply('✅ Fisio enviado.');
+        case 'all':
+          await sendDepartment();
+          await sendGeneric('Actividades Pocharia', POCHARIA_SHEET_ID, POCHARIA_SHEET_RANGE, 0,6,8,14, POCHARIA_CHANNEL_ID);
+          await sendGeneric('Actividades Tubos',    TUBOS_SHEET_ID,   TUBOS_SHEET_RANGE,   0,6,8,14, TUBOS_CHANNEL_ID);
+          await sendGeneric('Actividades Fisio',    FISIO_SHEET_ID,   FISIO_SHEET_RANGE,   0,8,10,16, FISIO_CHANNEL_ID);
+          return void await interaction.editReply('✅ Todas las secciones enviadas.');
+        default:
+          if (GROUPS.map(g=>g.toLowerCase()).includes(sub)) {
+            const area = groupMap[sub.toUpperCase()];
+            await sendArea(area);
+            return void await interaction.editReply(`✅ ${area} enviado.`);
+          }
+          return void await interaction.editReply('❌ Subcomando no reconocido.');
+      }
+    } catch (err) {
+      console.error(err);
+      await interaction.editReply('❌ Ocurrió un error al enviar.');
     }
-  } catch (err) {
-    console.error(err);
-    await interaction.editReply('❌ Ocurrió un error al enviar.');
+  }
+
+  // ——— /pending ———
+  if (interaction.commandName === 'pending') {
+    await interaction.deferReply({ ephemeral: true });
+    try {
+      await sendMyPending(interaction);
+      await interaction.editReply('✅ Te envié tus pendientes por DM.');
+    } catch (err) {
+      console.error(err);
+      await interaction.editReply('❌ No pude enviar tus pendientes.');
+    }
   }
 });
+
+
+/** ––––– Función que toma un Interaction y DM al usuario sus tareas pendientes ––––– **/
+async function sendMyPending(interaction) {
+  const userId = interaction.user.id;
+  const lines = ['📋 **Tus actividades pendientes**', ''];
+
+  // 1) Departamento
+  const { tasksPending } = await fetchTareas();
+  const myDept = tasksPending.filter(t => t.encargadoIds.includes(userId));
+  if (myDept.length) {
+    lines.push('**Departamento**');
+    myDept.forEach(t => {
+      const fecha = t.fecha.toLocaleDateString('es-MX');
+      lines.push(`• [${fecha}] ${t.group}: ${t.actividad}`);
+    });
+    lines.push('');
+  }
+
+  // 2) Pocharia, Tubos, Fisio
+  const genericConfigs = [
+    ['Pocharia', POCHARIA_SHEET_ID, POCHARIA_SHEET_RANGE, 0,6,8,14],
+    ['Tubos',    TUBOS_SHEET_ID,   TUBOS_SHEET_RANGE,   0,6,8,14],
+    ['Fisio',    FISIO_SHEET_ID,   FISIO_SHEET_RANGE,   0,8,10,16],
+  ];
+  for (const [title, sid, range, ca, ce, cd, cs] of genericConfigs) {
+    const { pending } = await fetchTasks(sid, range, ca, ce, cd, cs);
+    const mine = pending.filter(t => t.ids.includes(userId));
+    if (mine.length) {
+      lines.push(`**${title}**`);
+      mine.forEach(t => {
+        const fecha = t.fecha.toLocaleDateString('es-MX');
+        lines.push(`• [${fecha}] ${t.actividad}`);
+      });
+      lines.push('');
+    }
+  }
+
+  // 3) Si no hay nada
+  if (lines.length === 2) {
+    lines.splice(1, 1, '✅ ¡No tienes actividades pendientes!');
+  }
+
+  // 4) Enviar DM
+  await interaction.user.send(lines.join('\n'));
+}
+
 
 client.login(DISCORD_TOKEN);
