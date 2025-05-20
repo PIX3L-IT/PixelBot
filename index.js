@@ -93,68 +93,153 @@ async function fetchTasks(sheetId, range, colAct, colEnc, colDate, colStatus) {
 
 /** ––––– Sección “Departamento” (antiguo formato) ––––– **/
 
-const CMMI_AREAS = [
+// Lista de grupos en orden
+const GROUPS = [
   "RM","PP","PMC","M&A","PPQA","CM","RD","TS","PI",
   "VER","VAL","OPF","OPD","OT","IPM","RKM","DAR","REQM","Departamento"
 ];
+// Mapa de uppercase → nombre original
+const groupMap = GROUPS.reduce((acc, g) => {
+  acc[g.toUpperCase()] = g;
+  return acc;
+}, {});
 
+async function fetchTareas() {
+  const auth   = new google.auth.GoogleAuth({
+    keyFile: GOOGLE_SERVICE_ACCOUNT_CREDENTIALS,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly']
+  });
+  const sheets = google.sheets({ version: 'v4', auth });
+  const res    = await sheets.spreadsheets.values.get({
+    spreadsheetId: GOOGLE_SPREADSHEET_ID,
+    range: SHEET_RANGE
+  });
+  const filas = res.data.values || [];
+  const hoy   = new Date(); hoy.setHours(0,0,0,0);
+
+  const tasksToday   = [];
+  const tasksPending = [];
+
+  for (const row of filas) {
+    // Asegura que row tenga al menos 14 celdas (A→N)
+    while (row.length < 14) row.push('');
+
+    // 1. Grupo: primera palabra de columna A (idx 0)
+    const codeCell = row[0].trim();
+    const firstWord = codeCell.split(' ')[0] || '';
+    const groupKey  = firstWord.toUpperCase();
+    const group     = groupMap[groupKey] || 'Otros';
+
+    // 2. Actividad: columna B (idx 1)
+    const actividad = row[1].trim();
+    if (!actividad) continue;
+
+    // 3. Responsables: columna H (idx 7)
+    const nombres = (row[7] || '')
+      .split(',')
+      .map(n => n.trim())
+      .filter(Boolean);
+    const encargadoIds = nombres
+      .map(n => nameToId[n])
+      .filter(Boolean);
+
+    // 4. Fecha: columna I (idx 8) en DD/MM/YYYY
+    const rawDate = row[8].trim();
+    if (!rawDate) continue;
+    const parts = rawDate.split('/');
+    if (parts.length !== 3) continue;
+    const [d, m, y] = parts.map(n => parseInt(n, 10));
+    const fecha = new Date(y, m - 1, d);
+    fecha.setHours(0,0,0,0);
+
+    // 5. Estado: columna N (idx 13)
+    const estado = (row[13] || '').trim().toLowerCase();
+
+    // Clasifica
+    if (fecha.getTime() === hoy.getTime()) {
+      tasksToday.push({ group, actividad, nombres, encargadoIds });
+    } else if (fecha.getTime() < hoy.getTime() && estado === 'no realizado') {
+      tasksPending.push({ group, actividad, nombres, encargadoIds, fecha });
+    }
+  }
+
+  return { tasksToday, tasksPending };
+}
+
+// 2) Construir y enviar el mensaje, con chunks ≤2000 chars
 async function sendDepartment() {
-  const { today, pending } = await fetchTasks(
-    GOOGLE_SPREADSHEET_ID, SHEET_RANGE,
-    1,   // B: actividad
-    7,   // H: encargados
-    8,   // I: fecha
-    13   // N: estado
-  );
-  if (!today.length && !pending.length) return;
+  try {
+    const { tasksToday, tasksPending } = await fetchTareas();
+    if (!tasksToday.length && !tasksPending.length) return;
 
-  const fechaHoy = new Date().toLocaleDateString('es-MX');
-  const lines = [`📋 **Actividades para ${fechaHoy}**`, ''];
+    // Ordena pendientes de más antiguas a más recientes
+    tasksPending.sort((a, b) => a.fecha - b.fecha);
 
-  // HOY
-  for (const area of CMMI_AREAS) {
-    const items = today.filter(t => t.group === area);
-    if (!items.length) continue;
-    lines.push(`**${area}**`);
-    for (const t of items) {
-      const ment = t.ids.length
-        ? t.ids.map(i=>`<@${i}>`).join(', ')
-        : 'SIN ASIGNAR';
-      lines.push(`• ${t.actividad}: ${ment}`);
-    }
-    lines.push('');
-  }
+    const fechaLegible = new Date().toLocaleDateString('es-MX');
+    const lines = [`📋 Actividades para ${fechaLegible}`];
 
-  // PENDIENTES
-  if (pending.length) {
-    lines.push('⏳ **Pendientes:**', '');
-    for (const area of CMMI_AREAS) {
-      const items = pending.filter(t => t.group === area);
-      if (!items.length) continue;
-      lines.push(`**${area}**`);
-      for (const t of items) {
-        const ment = t.ids.length
-          ? t.ids.map(i=>`<@${i}>`).join(', ')
-          : 'SIN ASIGNAR';
-        const ds = t.fecha.toLocaleDateString('es-MX');
-        lines.push(`• ${t.actividad}: ${ment} - ${ds}`);
+    // -- Sección: tareas de hoy, agrupadas
+    for (const group of [...GROUPS, 'Otros']) {
+      const grupoHoy = tasksToday.filter(t => t.group === group);
+      if (!grupoHoy.length) continue;
+      lines.push(`**${group}**`);
+      for (const t of grupoHoy) {
+        let mentionText;
+        if (t.nombres.length === 0) {
+          mentionText = 'SIN ASIGNAR';
+        } else if (t.encargadoIds.length === 0) {
+          mentionText = 'Formato incorrecto (si son varios asignados, separarlos con comas)';
+        } else {
+          mentionText = t.encargadoIds.map(id => `<@${id}>`).join(', ');
+        }
+        lines.push(`• ${t.actividad}: ${mentionText}`);
       }
-      lines.push('');
     }
-  }
 
-  // envío
-  const ch = await client.channels.fetch(DISCORD_CHANNEL_ID);
-  let chunk = '';
-  for (const l of lines) {
-    if ((chunk+'\n'+l).length > 2000) {
-      await ch.send(chunk);
-      chunk = l;
-    } else {
-      chunk = chunk ? `${chunk}\n${l}` : l;
+    // -- Sección: pendientes
+    if (tasksPending.length) {
+      lines.push('⏳ Pendientes:');
+      for (const group of [...GROUPS, 'Otros']) {
+        const grupoPend = tasksPending.filter(t => t.group === group);
+        if (!grupoPend.length) continue;
+        lines.push(`**${group}**`);
+        for (const t of grupoPend) {
+          let mentionText;
+          if (t.nombres.length === 0) {
+            mentionText = 'SIN ASIGNAR';
+          } else if (t.encargadoIds.length === 0) {
+            mentionText = 'CHECAR PVG, FORMATO INCORRECTO';
+          } else {
+            mentionText = t.encargadoIds.map(id => `<@${id}>`).join(', ');
+          }
+          const fechaAnt = t.fecha.toLocaleDateString('es-MX');
+          lines.push(`• ${t.actividad}: ${mentionText} - ${fechaAnt}`);
+        }
+      }
     }
+
+    // Partir en trozos de ≤2000 chars
+    const canal = await client.channels.fetch(DISCORD_CHANNEL_ID);
+    const chunks = [];
+    let chunk = '';
+    for (const line of lines) {
+      if ((chunk + '\n' + line).length > 2000) {
+        chunks.push(chunk);
+        chunk = line;
+      } else {
+        chunk = chunk ? chunk + '\n' + line : line;
+      }
+    }
+    if (chunk) chunks.push(chunk);
+
+    // Enviar cada chunk
+    for (const msg of chunks) {
+      await canal.send({ content: msg });
+    }
+    console.log('Tareas enviadas en', chunks.length, 'mensajes');
+  } catch (err) {
+    console.error('Error al enviar tareas:', err);
   }
-  if (chunk) await ch.send(chunk);
 }
 
 /** ––––– Sección genérica para Pocharia, Tubos y Fisio ––––– **/
