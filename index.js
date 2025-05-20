@@ -556,17 +556,24 @@ async function sendAreaToUser(user, area) {
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  const isDM = !interaction.guildId;      // true si es un mensaje directo
-  const cmd  = interaction.commandName;
-  const sub  = isDM && cmd === 'send'
-    ? interaction.options.getSubcommand()
-    : interaction.options.getSubcommand?.(); 
+  const cmd = interaction.commandName;
+  const isDM = !interaction.guildId;
 
   try {
+    // ————— /misactividades —————
+    if (cmd === 'misactividades') {
+      // Este comando no tiene subcomandos, siempre va por DM
+      await sendMyPending(interaction);
+      return;
+    }
+
     // ————— /send —————
     if (cmd === 'send') {
+      // obtener subcomando sólo una vez
+      const sub = interaction.options.getSubcommand();
+
+      // Si viene por DM, respondemos también por DM
       if (isDM) {
-        // RESPONDE POR DM
         switch (sub) {
           case 'departamento':
             await sendDepartmentToUser(interaction.user);
@@ -576,7 +583,7 @@ client.on('interactionCreate', async interaction => {
               interaction.user,
               'Actividades Notaría',
               NOTARIA_SHEET_ID, NOTARIA_SHEET_RANGE,
-              0,6,8,14
+              0, 6, 8, 14
             );
             break;
           case 'tubos':
@@ -584,7 +591,7 @@ client.on('interactionCreate', async interaction => {
               interaction.user,
               'Actividades Tubos',
               TUBOS_SHEET_ID, TUBOS_SHEET_RANGE,
-              0,6,8,14
+              0, 6, 8, 14
             );
             break;
           case 'fisio':
@@ -592,7 +599,7 @@ client.on('interactionCreate', async interaction => {
               interaction.user,
               'Actividades Fisio',
               FISIO_SHEET_ID, FISIO_SHEET_RANGE,
-              0,8,10,16
+              0, 8, 10, 16
             );
             break;
           case 'all':
@@ -650,12 +657,6 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
-    // ————— /misactividades —————
-    if (cmd === 'misactividades') {
-      // siempre DM
-      await sendMyPending(interaction);
-      return;
-    }
   } catch (err) {
     console.error(err);
     if (isDM) {
@@ -665,6 +666,7 @@ client.on('interactionCreate', async interaction => {
     }
   }
 });
+
 
 
 
@@ -773,7 +775,7 @@ async function sendMyPending(interaction) {
   if (!hasFuture) lines.push('✅ No tienes actividades en el futuro.');
 
   // — Enviar DM —
-  await interaction.sendInChunks(user, lines);
+  await sendInChunks(interaction.user, lines);
 }
 
 
