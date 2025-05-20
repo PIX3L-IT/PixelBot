@@ -556,121 +556,114 @@ async function sendAreaToUser(user, area) {
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  const cmd = interaction.commandName;
+  const cmd  = interaction.commandName;
   const isDM = !interaction.guildId;
-
-  await interaction.reply({
-    content: '✅ Mensaje enviado',
-    ephemeral: true
-  });
 
   try {
     // ————— /misactividades —————
     if (cmd === 'misactividades') {
-      // Este comando no tiene subcomandos, siempre va por DM
+      // Avisa al usuario que le vas a enviar un DM
+      await interaction.reply({
+        content: '✅ ¡Te estoy enviando tus actividades por DM!',
+        flags: 64
+      });
+      // Envía las tareas por DM
       await sendMyPending(interaction);
       return;
     }
 
     // ————— /send —————
     if (cmd === 'send') {
-      // obtener subcomando sólo una vez
       const sub = interaction.options.getSubcommand();
 
-      // Si viene por DM, respondemos también por DM
-      if (isDM) {
-        switch (sub) {
-          case 'departamento':
-            await sendDepartmentToUser(interaction.user);
-            break;
-          case 'notaria':
-            await sendGenericToUser(
-              interaction.user,
-              'Actividades Notaría',
-              NOTARIA_SHEET_ID, NOTARIA_SHEET_RANGE,
-              0, 6, 8, 14
-            );
-            break;
-          case 'tubos':
-            await sendGenericToUser(
-              interaction.user,
-              'Actividades Tubos',
-              TUBOS_SHEET_ID, TUBOS_SHEET_RANGE,
-              0, 6, 8, 14
-            );
-            break;
-          case 'fisio':
-            await sendGenericToUser(
-              interaction.user,
-              'Actividades Fisio',
-              FISIO_SHEET_ID, FISIO_SHEET_RANGE,
-              0, 8, 10, 16
-            );
-            break;
-          case 'all':
-            await sendDepartmentToUser(interaction.user);
-            await sendGenericToUser(interaction.user, 'Notaría', NOTARIA_SHEET_ID, NOTARIA_SHEET_RANGE, 0,6,8,14);
-            await sendGenericToUser(interaction.user, 'Tubos',   TUBOS_SHEET_ID,   TUBOS_SHEET_RANGE,   0,6,8,14);
-            await sendGenericToUser(interaction.user, 'Fisio',   FISIO_SHEET_ID,   FISIO_SHEET_RANGE,   0,8,10,16);
-            break;
-          default:
-            if (GROUPS.map(g => g.toLowerCase()).includes(sub)) {
-              const area = groupMap[sub.toUpperCase()];
-              await sendAreaToUser(interaction.user, area);
-            } else {
-              await interaction.user.send('❌ Subcomando no reconocido.');
-            }
-        }
-        return;
-      }
+      // Avisa que estás procesando
+      await interaction.reply({
+        content: `✅ Enviando sección **${sub}**…`,
+        flags: 64
+      });
 
-      // — RESPUESTA EN CANAL —  
-      await interaction.deferReply({ ephemeral: true });
-      switch (sub) {
-        case 'departamento':
+      // contexto DM
+      if (isDM) {
+        if (sub === 'departamento') {
+          await sendDepartmentToUser(interaction.user);
+        } else if (sub === 'notaria') {
+          await sendGenericToUser(
+            interaction.user, 'Actividades Notaría',
+            NOTARIA_SHEET_ID, NOTARIA_SHEET_RANGE,
+            0, 6, 8, 14
+          );
+        } else if (sub === 'tubos') {
+          await sendGenericToUser(
+            interaction.user, 'Actividades Tubos',
+            TUBOS_SHEET_ID, TUBOS_SHEET_RANGE,
+            0, 6, 8, 14
+          );
+        } else if (sub === 'fisio') {
+          await sendGenericToUser(
+            interaction.user, 'Actividades Fisio',
+            FISIO_SHEET_ID, FISIO_SHEET_RANGE,
+            0, 8, 10, 16
+          );
+        } else if (sub === 'all') {
+          await sendDepartmentToUser(interaction.user);
+          await sendGenericToUser(interaction.user, 'Notaría', NOTARIA_SHEET_ID, NOTARIA_SHEET_RANGE, 0,6,8,14);
+          await sendGenericToUser(interaction.user, 'Tubos',   TUBOS_SHEET_ID,   TUBOS_SHEET_RANGE,   0,6,8,14);
+          await sendGenericToUser(interaction.user, 'Fisio',   FISIO_SHEET_ID,   FISIO_SHEET_RANGE,   0,8,10,16);
+        } else if (GROUPS.map(g => g.toLowerCase()).includes(sub)) {
+          const area = groupMap[sub.toUpperCase()];
+          await sendAreaToUser(interaction.user, area);
+        } else {
+          await interaction.user.send('❌ Subcomando no reconocido.');
+        }
+
+      // contexto canal
+      } else {
+        if (sub === 'departamento') {
           await sendDepartment();
-          await interaction.editReply('✅ Departamento enviado.');
-          break;
-        case 'notaria':
-          await sendGeneric('Actividades Notaría', NOTARIA_SHEET_ID, NOTARIA_SHEET_RANGE, 0,6,8,14, NOTARIA_CHANNEL_ID);
-          await interaction.editReply('✅ Notaría enviado.');
-          break;
-        case 'tubos':
-          await sendGeneric('Actividades Tubos', TUBOS_SHEET_ID, TUBOS_SHEET_RANGE, 0,6,8,14, TUBOS_CHANNEL_ID);
-          await interaction.editReply('✅ Tubos enviado.');
-          break;
-        case 'fisio':
-          await sendGeneric('Actividades Fisio', FISIO_SHEET_ID, FISIO_SHEET_RANGE, 0,8,10,16, FISIO_CHANNEL_ID);
-          await interaction.editReply('✅ Fisio enviado.');
-          break;
-        case 'all':
+        } else if (sub === 'notaria') {
+          await sendGeneric(
+            'Actividades Notaría',
+            NOTARIA_SHEET_ID, NOTARIA_SHEET_RANGE,
+            0,6,8,14, NOTARIA_CHANNEL_ID
+          );
+        } else if (sub === 'tubos') {
+          await sendGeneric(
+            'Actividades Tubos',
+            TUBOS_SHEET_ID, TUBOS_SHEET_RANGE,
+            0,6,8,14, TUBOS_CHANNEL_ID
+          );
+        } else if (sub === 'fisio') {
+          await sendGeneric(
+            'Actividades Fisio',
+            FISIO_SHEET_ID, FISIO_SHEET_RANGE,
+            0,8,10,16, FISIO_CHANNEL_ID
+          );
+        } else if (sub === 'all') {
           await sendDepartment();
           await sendGeneric('Actividades Notaría', NOTARIA_SHEET_ID, NOTARIA_SHEET_RANGE, 0,6,8,14, NOTARIA_CHANNEL_ID);
           await sendGeneric('Actividades Tubos',   TUBOS_SHEET_ID,   TUBOS_SHEET_RANGE,   0,6,8,14, TUBOS_CHANNEL_ID);
           await sendGeneric('Actividades Fisio',   FISIO_SHEET_ID,   FISIO_SHEET_RANGE,   0,8,10,16, FISIO_CHANNEL_ID);
-          await interaction.editReply('✅ Todas las secciones enviadas.');
-          break;
-        default:
-          if (GROUPS.map(g => g.toLowerCase()).includes(sub)) {
-            const area = groupMap[sub.toUpperCase()];
-            await sendArea(area);
-            await interaction.editReply(`✅ ${area} enviado.`);
-          } else {
-            await interaction.editReply('❌ Subcomando no reconocido.');
-          }
+        } else if (GROUPS.map(g => g.toLowerCase()).includes(sub)) {
+          const area = groupMap[sub.toUpperCase()];
+          await sendArea(area);
+        } else {
+          console.warn('Subcomando no reconocido en canal:', sub);
+        }
       }
       return;
     }
 
   } catch (err) {
     console.error(err);
-    if (isDM) {
-      await interaction.user.send('❌ Ocurrió un error al procesar tu solicitud.');
+    // Si ya respondiste, edita; si no, haz un reply de error
+    if (interaction.replied || interaction.deferred) {
+      await interaction.editReply('❌ Ocurrió un error procesando tu solicitud.');
     } else {
-      await interaction.editReply('❌ Ocurrió un error al procesar tu solicitud.');
+      await interaction.reply({ content: '❌ Error interno.', flags: 64 });
     }
   }
 });
+
 
 
 
