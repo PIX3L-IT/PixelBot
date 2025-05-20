@@ -559,6 +559,11 @@ client.on('interactionCreate', async interaction => {
   const cmd = interaction.commandName;
   const isDM = !interaction.guildId;
 
+  await interaction.reply({
+    content: '✅ Mensaje enviado',
+    ephemeral: true
+  });
+
   try {
     // ————— /misactividades —————
     if (cmd === 'misactividades') {
