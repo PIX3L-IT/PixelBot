@@ -29,9 +29,54 @@ const {
   GOOGLE_SERVICE_ACCOUNT_CREDENTIALS
 } = process.env;
 
-const client = new Client({ intents: [ GatewayIntentBits.Guilds ] });
+const creds = JSON.parse(GOOGLE_SERVICE_ACCOUNT_CREDENTIALS);
+const auth = new google.auth.GoogleAuth({
+  credentials: creds,
+  scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly']
+});
+
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.DirectMessages
+  ],
+  partials: ['CHANNEL']
+});
 
 /** ––––– Helpers compartidos ––––– **/
+
+/**
+ * Divide un array de líneas en chunks de ≤ maxLen caracteres.
+ * Retorna un array de strings.
+ */
+function chunkLines(lines, maxLen = 2000) {
+  const chunks = [];
+  let chunk = '';
+  for (const line of lines) {
+    // +1 para el '\n'
+    if (chunk.length + line.length + 1 > maxLen) {
+      chunks.push(chunk);
+      chunk = line;
+    } else {
+      chunk = chunk ? `${chunk}\n${line}` : line;
+    }
+  }
+  if (chunk) chunks.push(chunk);
+  return chunks;
+}
+
+/**
+ * Envía un array de líneas al canal (o usuario) en múltiples mensajes,
+ * aplicando chunkLines(...) para no pasarse de longitud.
+ */
+async function sendInChunks(target, lines) {
+  const chunks = chunkLines(lines);
+  for (const c of chunks) {
+    await target.send(c);
+  }
+}
+
 
 // Normalización & extracción de IDs
 function normalize(str) {
@@ -57,10 +102,7 @@ function extractIdsFromCell(text) {
 
 // Lectura genérica de Sheets para “hoy” y “pendientes”
 async function fetchTasks(sheetId, range, colAct, colEnc, colDate, colStatus) {
-  const auth   = new google.auth.GoogleAuth({
-    keyFile: GOOGLE_SERVICE_ACCOUNT_CREDENTIALS,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly']
-  });
+
   const sheets = google.sheets({ version:'v4', auth });
   const res    = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range });
   const rows   = res.data.values || [];
@@ -106,10 +148,7 @@ const groupMap = GROUPS.reduce((acc, g) => {
 }, {});
 
 async function fetchTareas() {
-  const auth   = new google.auth.GoogleAuth({
-    keyFile: GOOGLE_SERVICE_ACCOUNT_CREDENTIALS,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly']
-  });
+
   const sheets = google.sheets({ version: 'v4', auth });
   const res    = await sheets.spreadsheets.values.get({
     spreadsheetId: GOOGLE_SPREADSHEET_ID,
@@ -356,7 +395,7 @@ async function sendArea(area) {
 client.once('ready', async () => {
   console.log(`Conectado como ${client.user.tag}`);
 
-  // 1) Comando /send…
+  // 1) Builder de /send con todos sus subcomandos
   const sendBuilder = new SlashCommandBuilder()
     .setName('send')
     .setDescription('Enviar manualmente las secciones')
@@ -373,82 +412,260 @@ client.once('ready', async () => {
     );
   }
 
-  // 2) Comando /pending…
+  // 2) Builder de /misactividades
   const pendingBuilder = new SlashCommandBuilder()
     .setName('misactividades')
-    .setDescription('Recibe tus actividades por DM')
-    .toJSON();
+    .setDescription('Recibe tus actividades por DM');
 
-  // 3) Registramos ambos comandos (guild para test rápido, si existe)
-  const commands = [
+  // 3) Registramos AMBOS comandos de forma GLOBAL
+  const globalCommands = [
     sendBuilder.toJSON(),
-    pendingBuilder
+    pendingBuilder.toJSON()
   ];
-  const guild = client.guilds.cache.get(process.env.DISCORD_GUILD_ID);
-  if (guild) {
-    await guild.commands.set(commands);
-    console.log('Slash commands (send + pending) registrados en guild.');
-  } else {
-    await client.application.commands.set(commands);
-    console.log('Slash commands (send + pending) registrados globalmente.');
-  }
+  await client.application.commands.set(globalCommands);
+
+  console.log('✔️  Comandos globales (/send + /misactividades) registrados.');
 });
+
+
+/**
+ * Envía al usuario (por DM) las mismas líneas que sendDepartment()
+ */
+async function sendDepartmentToUser(user) {
+  const { tasksToday, tasksPending } = await fetchTareas();
+
+  const hoy = new Date().toLocaleDateString('es-MX');
+  const lines = [`📋 Actividades para ${hoy}`, ''];
+
+  // HOY
+  for (const group of [...GROUPS, 'Otros']) {
+    const hoyGrupo = tasksToday.filter(t => t.group === group);
+    if (!hoyGrupo.length) continue;
+    lines.push(`**${group}**`);
+    for (const t of hoyGrupo) {
+      const mention = t.encargadoIds.length
+        ? t.encargadoIds.map(id => `<@${id}>`).join(', ')
+        : (t.nombres.length ? 'Formato incorrecto' : 'SIN ASIGNAR');
+      lines.push(`• ${t.actividad}: ${mention}`);
+    }
+  }
+
+  // PENDIENTES
+  if (tasksPending.length) {
+    lines.push('', '⏳ Pendientes:');
+    for (const group of [...GROUPS, 'Otros']) {
+      const pen = tasksPending.filter(t => t.group === group);
+      if (!pen.length) continue;
+      lines.push(`**${group}**`);
+      for (const t of pen) {
+        const mention = t.encargadoIds.length
+          ? t.encargadoIds.map(id => `<@${id}>`).join(', ')
+          : (t.nombres.length ? 'Formato incorrecto' : 'SIN ASIGNAR');
+        const fecha = t.fecha.toLocaleDateString('es-MX');
+        lines.push(`• ${t.actividad}: ${mention} — ${fecha}`);
+      }
+    }
+  }
+
+  await sendInChunks(user, lines);
+}
+
+/**
+ * Envía al usuario (por DM) las mismas líneas que sendGeneric(...)
+ */
+async function sendGenericToUser(user, title, sheetId, range, colAct, colEnc, colDate, colStatus) {
+  const { today, pending } = await fetchTasks(sheetId, range, colAct, colEnc, colDate, colStatus);
+
+  const fechaHoy = new Date().toLocaleDateString('es-MX');
+  const lines = [`📋 **${title} — ${fechaHoy}**`, ''];
+
+  // HOY
+  const mapHoy = new Map();
+  today.forEach(t => {
+    const key = t.ids.length ? t.ids.map(i=>`<@${i}>`).join(', ') : 'SIN_ASIGNAR';
+    (mapHoy.get(key) || mapHoy.set(key, []).get(key)).push(t);
+  });
+  for (const [key, tasks] of mapHoy) {
+    lines.push(key);
+    tasks.forEach(t => lines.push(`• ${t.actividad}`));
+    lines.push('');
+  }
+
+  // PENDIENTES
+  if (pending.length) {
+    lines.push('⌛ **Pendientes:**', '');
+    const mapPen = new Map();
+    pending.forEach(t => {
+      const key = t.ids.length ? t.ids.map(i=>`<@${i}>`).join(', ') : 'SIN_ASIGNAR';
+      (mapPen.get(key) || mapPen.set(key, []).get(key)).push(t);
+    });
+    for (const [key, tasks] of mapPen) {
+      lines.push(key);
+      tasks.forEach(t => {
+        const fecha = t.fecha.toLocaleDateString('es-MX');
+        lines.push(`• ${t.actividad} — ${fecha}`);
+      });
+      lines.push('');
+    }
+  }
+
+  await sendInChunks(user, lines);
+}
+
+/**
+ * Envía al usuario (por DM) las mismas líneas que sendArea(area)
+ */
+async function sendAreaToUser(user, area) {
+  const { tasksToday, tasksPending } = await fetchTareas();
+
+  const hoyStr = new Date().toLocaleDateString('es-MX');
+  const lines = [`📋 Actividades **${area}** para ${hoyStr}`, ''];
+
+  // HOY
+  const hoy = tasksToday.filter(t => t.group === area);
+  if (hoy.length) {
+    hoy.forEach(t => {
+      const mention = t.encargadoIds.length
+        ? t.encargadoIds.map(id => `<@${id}>`).join(', ')
+        : (t.nombres.length ? 'Formato incorrecto' : 'SIN ASIGNAR');
+      lines.push(`• ${t.actividad}: ${mention}`);
+    });
+    lines.push('');
+  } else {
+    lines.push('— No hay actividades para hoy —', '');
+  }
+
+  // PENDIENTES
+  const pen = tasksPending.filter(t => t.group === area);
+  if (pen.length) {
+    lines.push('⏳ Pendientes:');
+    pen.forEach(t => {
+      const mention = t.encargadoIds.length
+        ? t.encargadoIds.map(id => `<@${id}>`).join(', ')
+        : (t.nombres.length ? 'Formato incorrecto' : 'SIN ASIGNAR');
+      const fecha = t.fecha.toLocaleDateString('es-MX');
+      lines.push(`• ${t.actividad}: ${mention} — ${fecha}`);
+    });
+  }
+
+  await sendInChunks(user, lines);
+}
 
 
 /** ––––– Manejar interacciones ––––– **/
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  // ——— /send ———
-  if (interaction.commandName === 'send') {
-    await interaction.deferReply({ ephemeral: true });
-    const sub = interaction.options.getSubcommand();
-    try {
+  const isDM = !interaction.guildId;      // true si es un mensaje directo
+  const cmd  = interaction.commandName;
+  const sub  = isDM && cmd === 'send'
+    ? interaction.options.getSubcommand()
+    : interaction.options.getSubcommand?.(); 
+
+  try {
+    // ————— /send —————
+    if (cmd === 'send') {
+      if (isDM) {
+        // RESPONDE POR DM
+        switch (sub) {
+          case 'departamento':
+            await sendDepartmentToUser(interaction.user);
+            break;
+          case 'notaria':
+            await sendGenericToUser(
+              interaction.user,
+              'Actividades Notaría',
+              NOTARIA_SHEET_ID, NOTARIA_SHEET_RANGE,
+              0,6,8,14
+            );
+            break;
+          case 'tubos':
+            await sendGenericToUser(
+              interaction.user,
+              'Actividades Tubos',
+              TUBOS_SHEET_ID, TUBOS_SHEET_RANGE,
+              0,6,8,14
+            );
+            break;
+          case 'fisio':
+            await sendGenericToUser(
+              interaction.user,
+              'Actividades Fisio',
+              FISIO_SHEET_ID, FISIO_SHEET_RANGE,
+              0,8,10,16
+            );
+            break;
+          case 'all':
+            await sendDepartmentToUser(interaction.user);
+            await sendGenericToUser(interaction.user, 'Notaría', NOTARIA_SHEET_ID, NOTARIA_SHEET_RANGE, 0,6,8,14);
+            await sendGenericToUser(interaction.user, 'Tubos',   TUBOS_SHEET_ID,   TUBOS_SHEET_RANGE,   0,6,8,14);
+            await sendGenericToUser(interaction.user, 'Fisio',   FISIO_SHEET_ID,   FISIO_SHEET_RANGE,   0,8,10,16);
+            break;
+          default:
+            if (GROUPS.map(g => g.toLowerCase()).includes(sub)) {
+              const area = groupMap[sub.toUpperCase()];
+              await sendAreaToUser(interaction.user, area);
+            } else {
+              await interaction.user.send('❌ Subcomando no reconocido.');
+            }
+        }
+        return;
+      }
+
+      // — RESPUESTA EN CANAL —  
+      await interaction.deferReply({ ephemeral: true });
       switch (sub) {
         case 'departamento':
           await sendDepartment();
-          return void await interaction.editReply('✅ Departamento enviado.');
+          await interaction.editReply('✅ Departamento enviado.');
+          break;
         case 'notaria':
           await sendGeneric('Actividades Notaría', NOTARIA_SHEET_ID, NOTARIA_SHEET_RANGE, 0,6,8,14, NOTARIA_CHANNEL_ID);
-          return void await interaction.editReply('✅ Notaría enviado.');
+          await interaction.editReply('✅ Notaría enviado.');
+          break;
         case 'tubos':
           await sendGeneric('Actividades Tubos', TUBOS_SHEET_ID, TUBOS_SHEET_RANGE, 0,6,8,14, TUBOS_CHANNEL_ID);
-          return void await interaction.editReply('✅ Tubos enviado.');
+          await interaction.editReply('✅ Tubos enviado.');
+          break;
         case 'fisio':
           await sendGeneric('Actividades Fisio', FISIO_SHEET_ID, FISIO_SHEET_RANGE, 0,8,10,16, FISIO_CHANNEL_ID);
-          return void await interaction.editReply('✅ Fisio enviado.');
+          await interaction.editReply('✅ Fisio enviado.');
+          break;
         case 'all':
           await sendDepartment();
           await sendGeneric('Actividades Notaría', NOTARIA_SHEET_ID, NOTARIA_SHEET_RANGE, 0,6,8,14, NOTARIA_CHANNEL_ID);
-          await sendGeneric('Actividades Tubos',    TUBOS_SHEET_ID,   TUBOS_SHEET_RANGE,   0,6,8,14, TUBOS_CHANNEL_ID);
-          await sendGeneric('Actividades Fisio',    FISIO_SHEET_ID,   FISIO_SHEET_RANGE,   0,8,10,16, FISIO_CHANNEL_ID);
-          return void await interaction.editReply('✅ Todas las secciones enviadas.');
+          await sendGeneric('Actividades Tubos',   TUBOS_SHEET_ID,   TUBOS_SHEET_RANGE,   0,6,8,14, TUBOS_CHANNEL_ID);
+          await sendGeneric('Actividades Fisio',   FISIO_SHEET_ID,   FISIO_SHEET_RANGE,   0,8,10,16, FISIO_CHANNEL_ID);
+          await interaction.editReply('✅ Todas las secciones enviadas.');
+          break;
         default:
-          if (GROUPS.map(g=>g.toLowerCase()).includes(sub)) {
+          if (GROUPS.map(g => g.toLowerCase()).includes(sub)) {
             const area = groupMap[sub.toUpperCase()];
             await sendArea(area);
-            return void await interaction.editReply(`✅ ${area} enviado.`);
+            await interaction.editReply(`✅ ${area} enviado.`);
+          } else {
+            await interaction.editReply('❌ Subcomando no reconocido.');
           }
-          return void await interaction.editReply('❌ Subcomando no reconocido.');
       }
-    } catch (err) {
-      console.error(err);
-      await interaction.editReply('❌ Ocurrió un error al enviar.');
+      return;
     }
-  }
 
-  // ——— /pending ———
-  if (interaction.commandName === 'misactividades') {
-    await interaction.deferReply({ ephemeral: true });
-    try {
+    // ————— /misactividades —————
+    if (cmd === 'misactividades') {
+      // siempre DM
       await sendMyPending(interaction);
-      await interaction.editReply('✅ Te envié tus actividades por DM.');
-    } catch (err) {
-      console.error(err);
-      await interaction.editReply('❌ No pude enviar tus actividades.');
+      return;
+    }
+  } catch (err) {
+    console.error(err);
+    if (isDM) {
+      await interaction.user.send('❌ Ocurrió un error al procesar tu solicitud.');
+    } else {
+      await interaction.editReply('❌ Ocurrió un error al procesar tu solicitud.');
     }
   }
 });
+
 
 
 /** ––––– Función que toma un Interaction y DM al usuario sus tareas pendientes ––––– **/
@@ -556,9 +773,8 @@ async function sendMyPending(interaction) {
   if (!hasFuture) lines.push('✅ No tienes actividades en el futuro.');
 
   // — Enviar DM —
-  await interaction.user.send(lines.join('\n'));
+  await interaction.sendInChunks(user, lines);
 }
-
 
 
 client.login(DISCORD_TOKEN);
