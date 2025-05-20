@@ -95,7 +95,7 @@ async function fetchTasks(sheetId, range, colAct, colEnc, colDate, colStatus) {
 
 // Lista de grupos en orden
 const GROUPS = [
-  "RM","PP","PMC","M&A","PPQA","CM","RD","TS","PI",
+  "RM","PP","PMC","MA","PPQA","CM","RD","TS","PI",
   "VER","VAL","OPF","OPD","OT","IPM","RKM","DAR","REQM","Departamento"
 ];
 // Mapa de uppercase → nombre original
@@ -208,7 +208,7 @@ async function sendDepartment() {
           if (t.nombres.length === 0) {
             mentionText = 'SIN ASIGNAR';
           } else if (t.encargadoIds.length === 0) {
-            mentionText = 'CHECAR PVG, FORMATO INCORRECTO';
+            mentionText = 'Formato incorrecto (si son varios asignados, separarlos con comas)';
           } else {
             mentionText = t.encargadoIds.map(id => `<@${id}>`).join(', ');
           }
@@ -316,50 +316,119 @@ async function sendGeneric(title, sheetId, range, colAct, colEnc, colDate, colSt
   if (chunk) await ch.send(chunk);
 }
 
+// Nada más un área del CMMI
+async function sendArea(area) {
+  try {
+    const { tasksToday, tasksPending } = await fetchTareas();
+    // Filtrar sólo el área solicitada
+    const hoyStr = new Date().toLocaleDateString('es-MX');
+    const lines = [`📋 Actividades **${area}** para ${hoyStr}`, ''];
+
+    // Tareas de hoy
+    const hoy = tasksToday.filter(t => t.group === area);
+    if (hoy.length) {
+      for (const t of hoy) {
+        const mention = t.encargadoIds.length
+          ? t.encargadoIds.map(id => `<@${id}>`).join(', ')
+          : (t.nombres.length ? 'Formato incorrecto' : 'SIN ASIGNAR');
+        lines.push(`• ${t.actividad}: ${mention}`);
+      }
+    } else {
+      lines.push('— No hay actividades para hoy —');
+    }
+
+    // Pendientes
+    const pen = tasksPending.filter(t => t.group === area);
+    if (pen.length) {
+      lines.push('', '⏳ Pendientes:');
+      for (const t of pen) {
+        const mention = t.encargadoIds.length
+          ? t.encargadoIds.map(id => `<@${id}>`).join(', ')
+          : (t.nombres.length ? 'Formato incorrecto' : 'SIN ASIGNAR');
+        const fecha = t.fecha.toLocaleDateString('es-MX');
+        lines.push(`• ${t.actividad}: ${mention} — ${fecha}`);
+      }
+    }
+
+    // Partir en trozos ≤2000 caracteres
+    const canal = await client.channels.fetch(DISCORD_CHANNEL_ID);
+    let chunk = '';
+    for (const line of lines) {
+      if ((chunk + '\n' + line).length > 2000) {
+        await canal.send(chunk);
+        chunk = line;
+      } else {
+        chunk = chunk ? `${chunk}\n${line}` : line;
+      }
+    }
+    if (chunk) await canal.send(chunk);
+
+  } catch (err) {
+    console.error(`Error al enviar área ${area}:`, err);
+  }
+}
+
 /** ––––– Registrar comandos slash y manejarlos ––––– **/
 
 client.once('ready', async () => {
   console.log(`Conectado como ${client.user.tag}`);
 
-  // Definimos un único comando /send con subcomandos
-  const commands = [
-    new SlashCommandBuilder()
-      .setName('send')
-      .setDescription('Enviar manualmente las secciones')
-      .addSubcommand(sub => sub
-        .setName('departamento')
-        .setDescription('Envía actividades Departamento'))
-      .addSubcommand(sub => sub
-        .setName('pocharia')
-        .setDescription('Envía actividades Pocharia'))
-      .addSubcommand(sub => sub
-        .setName('tubos')
-        .setDescription('Envía actividades Tubos'))
-      .addSubcommand(sub => sub
-        .setName('fisio')
-        .setDescription('Envía actividades Fisio'))
-      .addSubcommand(sub => sub
-        .setName('all')
-        .setDescription('Envía todas las secciones'))
-      .toJSON()
-  ];
+  // Construimos /send con subcomandos fijos + dinámicos
+  const sendBuilder = new SlashCommandBuilder()
+    .setName('send')
+    .setDescription('Enviar manualmente las secciones')
+    // subcomandos fijos
+    .addSubcommand(sub => sub
+      .setName('departamento')
+      .setDescription('Envía actividades Departamento'))
+    .addSubcommand(sub => sub
+      .setName('pocharia')
+      .setDescription('Envía actividades Pocharia'))
+    .addSubcommand(sub => sub
+      .setName('tubos')
+      .setDescription('Envía actividades Tubos'))
+    .addSubcommand(sub => sub
+      .setName('fisio')
+      .setDescription('Envía actividades Fisio'))
+    .addSubcommand(sub => sub
+      .setName('all')
+      .setDescription('Envía todas las secciones'));
 
-  // Registramos globalmente
-  await client.application.commands.set(commands);
-  console.log('Slash commands registrados.');
+  // añadimos un subcomando por cada grupo de CMMI
+  for (const g of GROUPS) {
+    if (g === 'Departamento') continue; // ya está como subcomando fijo
+    sendBuilder.addSubcommand(sub =>
+      sub
+        .setName(g.toLowerCase())
+        .setDescription(`Envía actividades ${g}`)
+    );
+  }
+
+  // -> Para desarrollo inmediato, registra en tu guild:
+  const guild = client.guilds.cache.get(process.env.DISCORD_GUILD_ID);
+  if (guild) {
+    await guild.commands.set([ sendBuilder.toJSON() ]);
+    console.log('Slash commands registrados en guild.');
+  } else {
+    // -> En producción, como global:
+    await client.application.commands.set([ sendBuilder.toJSON() ]);
+    console.log('Slash commands registrados globalmente.');
+  }
 });
 
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand() || interaction.commandName !== 'send') return;
 
   await interaction.deferReply({ ephemeral: true });
+  const sub = interaction.options.getSubcommand();
+
   try {
-    const sub = interaction.options.getSubcommand();
     switch (sub) {
       case 'departamento':
         await sendDepartment();
         await interaction.editReply('✅ Departamento enviado.');
         break;
+
       case 'pocharia':
         await sendGeneric(
           'Actividades Pocharia',
@@ -368,6 +437,7 @@ client.on('interactionCreate', async interaction => {
         );
         await interaction.editReply('✅ Pocharia enviado.');
         break;
+
       case 'tubos':
         await sendGeneric(
           'Actividades Tubos',
@@ -376,6 +446,7 @@ client.on('interactionCreate', async interaction => {
         );
         await interaction.editReply('✅ Tubos enviado.');
         break;
+
       case 'fisio':
         await sendGeneric(
           'Actividades Fisio',
@@ -384,6 +455,7 @@ client.on('interactionCreate', async interaction => {
         );
         await interaction.editReply('✅ Fisio enviado.');
         break;
+
       case 'all':
         await sendDepartment();
         await sendGeneric(
@@ -403,6 +475,16 @@ client.on('interactionCreate', async interaction => {
         );
         await interaction.editReply('✅ Todas las secciones enviadas.');
         break;
+
+      default:
+        // dinámica: si coincide con uno de los GROUPS en lowercase
+        if (GROUPS.map(g => g.toLowerCase()).includes(sub)) {
+          const area = groupMap[sub.toUpperCase()] || sub;
+          await sendArea(area);
+          await interaction.editReply(`✅ ${area} enviado.`);
+        } else {
+          await interaction.editReply('❌ Subcomando no reconocido.');
+        }
     }
   } catch (err) {
     console.error(err);
@@ -411,67 +493,3 @@ client.on('interactionCreate', async interaction => {
 });
 
 client.login(DISCORD_TOKEN);
-
-
-
-
-
-
-
-
-
-
-
-
-/* require('dotenv').config();
-const { Client, GatewayIntentBits } = require('discord.js');
-const cron = require('node-cron');
-
-
-// Variables desde .env
-const {
-  DISCORD_TOKEN,      // Token de tu bot
-  DISCORD_CHANNEL_ID, // ID del canal donde enviar el mensaje
-  CRON_SCHEDULE,      // Ej: '0 8 * * *'
-  TIMEZONE            // Ej: 'America/Mexico_City'
-} = process.env;
-
-// 1) Inicializa cliente de Discord
-const client = new Client({
-  intents: [ GatewayIntentBits.Guilds ]
-});
-
-const gifUrl = 'https://media.giphy.com/media/3oEjI6SIIHBdRxXI40/giphy.gif';
-
-client.once('ready', () => {
-  console.log(`Conectado como ${client.user.tag}`);
-
-  // 2) Programa el cronjob
-  cron.schedule(
-    CRON_SCHEDULE,
-    async () => {
-      try {
-        const canal = await client.channels.fetch(DISCORD_CHANNEL_ID);
-        await canal.send(
-          `<@1247721603987669044> ya paga la manutención `
-        );
-        console.log('Mensaje de prueba enviado.');
-      } catch (err) {
-        console.error('Error al enviar el mensaje de prueba:', err);
-      }
-    },
-    { timezone: TIMEZONE }
-  );
-});
-
-// 3) Inicia sesión
-client.login(DISCORD_TOKEN);
-  */
-
-
-/* await canal.send({
-  content: '¡Aquí va un GIF de celebración!',
-  embeds: [{
-    image: { url: gifUrl }
-  }]
-}); */
