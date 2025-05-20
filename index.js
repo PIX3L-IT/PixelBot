@@ -468,34 +468,66 @@ client.on('interactionCreate', async interaction => {
 
 
 /** ––––– Función que toma un Interaction y DM al usuario sus tareas pendientes ––––– **/
+/**
+ * Envía por DM las actividades de hoy y las pendientes de la persona que invoca el comando.
+ */
+/**
+ * Envía por DM las actividades de HOY y las PENDIENTES de la persona que invoca el comando.
+ */
 async function sendMyPending(interaction) {
   const userId = interaction.user.id;
-  const lines = ['📋 **Tus actividades pendientes**', ''];
+  const lines = [];
 
-  // 1) Departamento
-  const { tasksPending } = await fetchTareas();
-  const myDept = tasksPending.filter(t => t.encargadoIds.includes(userId));
-  if (myDept.length) {
+  // —— 1) ACTIVIDADES DE HOY ——
+  lines.push('📋 **Tus actividades para HOY**', '');
+  let hasToday = false;
+
+  // Departamento
+  const { tasksToday: deptToday, tasksPending: deptPending } = await fetchTareas();
+  const myDeptToday = deptToday.filter(t => t.encargadoIds.includes(userId));
+  if (myDeptToday.length) {
+    hasToday = true;
     lines.push('**Departamento**');
-    myDept.forEach(t => {
-      const fecha = t.fecha.toLocaleDateString('es-MX');
-      lines.push(`• [${fecha}] ${t.group}: ${t.actividad}`);
+    myDeptToday.forEach(t => {
+      lines.push(`• ${t.actividad}`);
     });
     lines.push('');
   }
 
-  // 2) Pocharia, Tubos, Fisio
+  // Pocharia, Tubos, Fisio
   const genericConfigs = [
     ['Pocharia', POCHARIA_SHEET_ID, POCHARIA_SHEET_RANGE, 0,6,8,14],
     ['Tubos',    TUBOS_SHEET_ID,   TUBOS_SHEET_RANGE,   0,6,8,14],
     ['Fisio',    FISIO_SHEET_ID,   FISIO_SHEET_RANGE,   0,8,10,16],
   ];
-  for (const [title, sid, range, ca, ce, cd, cs] of genericConfigs) {
-    const { pending } = await fetchTasks(sid, range, ca, ce, cd, cs);
-    const mine = pending.filter(t => t.ids.includes(userId));
-    if (mine.length) {
+  for (const [title, sid, range, colAct, colEnc, colDate, colStatus] of genericConfigs) {
+    const { today: genToday } = await fetchTasks(sid, range, colAct, colEnc, colDate, colStatus);
+    const mineToday = genToday.filter(t => t.ids.includes(userId));
+    if (mineToday.length) {
+      hasToday = true;
       lines.push(`**${title}**`);
-      mine.forEach(t => {
+      mineToday.forEach(t => {
+        lines.push(`• ${t.actividad}`);
+      });
+      lines.push('');
+    }
+  }
+
+  if (!hasToday) {
+    lines.push('✅ No tienes actividades para hoy.', '');
+  }
+
+  // —— 2) ACTIVIDADES PENDIENTES ——
+  lines.push('⌛ **Tus actividades PENDIENTES**', '');
+  let hasPending = false;
+
+  // Departamento pendientes
+  if (deptPending.length) {
+    const myDeptPending = deptPending.filter(t => t.encargadoIds.includes(userId));
+    if (myDeptPending.length) {
+      hasPending = true;
+      lines.push('**Departamento**');
+      myDeptPending.forEach(t => {
         const fecha = t.fecha.toLocaleDateString('es-MX');
         lines.push(`• [${fecha}] ${t.actividad}`);
       });
@@ -503,14 +535,29 @@ async function sendMyPending(interaction) {
     }
   }
 
-  // 3) Si no hay nada
-  if (lines.length === 2) {
-    lines.splice(1, 1, '✅ ¡No tienes actividades pendientes!');
+  // Genéricos pendientes
+  for (const [title, sid, range, colAct, colEnc, colDate, colStatus] of genericConfigs) {
+    const { pending: genPend } = await fetchTasks(sid, range, colAct, colEnc, colDate, colStatus);
+    const minePend = genPend.filter(t => t.ids.includes(userId));
+    if (minePend.length) {
+      hasPending = true;
+      lines.push(`**${title}**`);
+      minePend.forEach(t => {
+        const fecha = t.fecha.toLocaleDateString('es-MX');
+        lines.push(`• [${fecha}] ${t.actividad}`);
+      });
+      lines.push('');
+    }
   }
 
-  // 4) Enviar DM
+  if (!hasPending) {
+    lines.push('✅ ¡No tienes actividades pendientes!');
+  }
+
+  // —— 3) Envío por DM ——
   await interaction.user.send(lines.join('\n'));
 }
+
 
 
 client.login(DISCORD_TOKEN);
