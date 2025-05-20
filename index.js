@@ -13,10 +13,10 @@ const {
   // Departamento
   GOOGLE_SPREADSHEET_ID,
   SHEET_RANGE,
-  // Pocharia
-  POCHARIA_SHEET_ID,
-  POCHARIA_SHEET_RANGE,
-  POCHARIA_CHANNEL_ID,
+  // Notaría
+  NOTARIA_SHEET_ID,
+  NOTARIA_SHEET_RANGE,
+  NOTARIA_CHANNEL_ID,
   // Tubos
   TUBOS_SHEET_ID,
   TUBOS_SHEET_RANGE,
@@ -68,27 +68,28 @@ async function fetchTasks(sheetId, range, colAct, colEnc, colDate, colStatus) {
 
   const today   = [];
   const pending = [];
+  const future  = [];
 
   for (const row of rows) {
     while (row.length <= Math.max(colAct, colEnc, colDate, colStatus)) row.push('');
     const act = row[colAct].trim();
     if (!act) continue;
-
-    const ids    = extractIdsFromCell(row[colEnc]||'');
-    const parts  = (row[colDate]||'').split('/');
+    const ids = extractIdsFromCell(row[colEnc]||'');
+    const parts = (row[colDate]||'').split('/');
     if (parts.length!==3) continue;
     const [d,m,y] = parts.map(n=>parseInt(n,10));
-    const date    = new Date(y,m-1,d); date.setHours(0,0,0,0);
+    const fecha   = new Date(y,m-1,d); fecha.setHours(0,0,0,0);
     if ((row[colStatus]||'').trim().toLowerCase() !== 'no realizado') continue;
 
-    const obj = { actividad: act, ids, fecha: date };
-    if (date.getTime()===today0.getTime()) today.push(obj);
-    else if (date < today0) pending.push(obj);
+    const obj = { actividad: act, ids, fecha };
+    if      (fecha.getTime() === today0.getTime()) today.push(obj);
+    else if (fecha.getTime() <  today0.getTime()) pending.push(obj);
+    else                                           future.push(obj);
   }
 
-  // por antigüedad
   pending.sort((a,b)=>a.fecha - b.fecha);
-  return { today, pending };
+  future.sort((a,b)=>a.fecha - b.fecha);
+  return { today, pending, future };
 }
 
 /** ––––– Sección “Departamento” (antiguo formato) ––––– **/
@@ -119,51 +120,34 @@ async function fetchTareas() {
 
   const tasksToday   = [];
   const tasksPending = [];
+  const tasksFuture  = [];
 
   for (const row of filas) {
-    // Asegura que row tenga al menos 14 celdas (A→N)
     while (row.length < 14) row.push('');
-
-    // 1. Grupo: primera palabra de columna A (idx 0)
-    const codeCell = row[0].trim();
-    const firstWord = codeCell.split(' ')[0] || '';
-    const groupKey  = firstWord.toUpperCase();
-    const group     = groupMap[groupKey] || 'Otros';
-
-    // 2. Actividad: columna B (idx 1)
+    const codeCell = row[0].trim().split(' ')[0].toUpperCase();
+    const group    = groupMap[codeCell] || 'Otros';
     const actividad = row[1].trim();
     if (!actividad) continue;
 
-    // 3. Responsables: columna H (idx 7)
-    const nombres = (row[7] || '')
-      .split(',')
-      .map(n => n.trim())
-      .filter(Boolean);
-    const encargadoIds = nombres
-      .map(n => nameToId[n])
-      .filter(Boolean);
-
-    // 4. Fecha: columna I (idx 8) en DD/MM/YYYY
-    const rawDate = row[8].trim();
+    const nombres      = (row[7]||'').split(',').map(n=>n.trim()).filter(Boolean);
+    const encargadoIds = nombres.map(n=>nameToId[n]).filter(Boolean);
+    const rawDate      = row[8].trim();
     if (!rawDate) continue;
-    const parts = rawDate.split('/');
-    if (parts.length !== 3) continue;
-    const [d, m, y] = parts.map(n => parseInt(n, 10));
-    const fecha = new Date(y, m - 1, d);
-    fecha.setHours(0,0,0,0);
+    const [d,m,y] = rawDate.split('/').map(n=>parseInt(n,10));
+    const fecha   = new Date(y,m-1,d); fecha.setHours(0,0,0,0);
 
-    // 5. Estado: columna N (idx 13)
-    const estado = (row[13] || '').trim().toLowerCase();
+    const estado = (row[13]||'').trim().toLowerCase();
+    if (estado !== 'no realizado') continue;
 
-    // Clasifica
-    if (fecha.getTime() === hoy.getTime()) {
-      tasksToday.push({ group, actividad, nombres, encargadoIds });
-    } else if (fecha.getTime() < hoy.getTime() && estado === 'no realizado') {
-      tasksPending.push({ group, actividad, nombres, encargadoIds, fecha });
-    }
+    const obj = { group, actividad, nombres, encargadoIds, fecha };
+    if      (fecha.getTime() === hoy.getTime()) tasksToday.push(obj);
+    else if (fecha.getTime() <  hoy.getTime()) tasksPending.push(obj);
+    else                                        tasksFuture.push(obj);
   }
 
-  return { tasksToday, tasksPending };
+  tasksPending.sort((a,b) => a.fecha - b.fecha);
+  tasksFuture.sort((a,b)  => a.fecha - b.fecha);
+  return { tasksToday, tasksPending, tasksFuture };
 }
 
 // 2) Construir y enviar el mensaje, con chunks ≤2000 chars
@@ -242,7 +226,7 @@ async function sendDepartment() {
   }
 }
 
-/** ––––– Sección genérica para Pocharia, Tubos y Fisio ––––– **/
+/** ––––– Sección genérica para Notaría, Tubos y Fisio ––––– **/
 
 async function sendGeneric(title, sheetId, range, colAct, colEnc, colDate, colStatus, channelId) {
   const { today, pending } = await fetchTasks(sheetId, range, colAct, colEnc, colDate, colStatus);
@@ -377,7 +361,7 @@ client.once('ready', async () => {
     .setName('send')
     .setDescription('Enviar manualmente las secciones')
     .addSubcommand(sub => sub.setName('departamento').setDescription('Envía actividades Departamento'))
-    .addSubcommand(sub => sub.setName('pocharia')    .setDescription('Envía actividades Pocharia'))
+    .addSubcommand(sub => sub.setName('notaria')    .setDescription('Envía actividades Notaría'))
     .addSubcommand(sub => sub.setName('tubos')       .setDescription('Envía actividades Tubos'))
     .addSubcommand(sub => sub.setName('fisio')       .setDescription('Envía actividades Fisio'))
     .addSubcommand(sub => sub.setName('all')         .setDescription('Envía todas las secciones'));
@@ -391,8 +375,8 @@ client.once('ready', async () => {
 
   // 2) Comando /pending…
   const pendingBuilder = new SlashCommandBuilder()
-    .setName('pending')
-    .setDescription('Recibe tus actividades pendientes por DM')
+    .setName('misactividades')
+    .setDescription('Recibe tus actividades por DM')
     .toJSON();
 
   // 3) Registramos ambos comandos (guild para test rápido, si existe)
@@ -424,9 +408,9 @@ client.on('interactionCreate', async interaction => {
         case 'departamento':
           await sendDepartment();
           return void await interaction.editReply('✅ Departamento enviado.');
-        case 'pocharia':
-          await sendGeneric('Actividades Pocharia', POCHARIA_SHEET_ID, POCHARIA_SHEET_RANGE, 0,6,8,14, POCHARIA_CHANNEL_ID);
-          return void await interaction.editReply('✅ Pocharia enviado.');
+        case 'notaria':
+          await sendGeneric('Actividades Notaría', NOTARIA_SHEET_ID, NOTARIA_SHEET_RANGE, 0,6,8,14, NOTARIA_CHANNEL_ID);
+          return void await interaction.editReply('✅ Notaría enviado.');
         case 'tubos':
           await sendGeneric('Actividades Tubos', TUBOS_SHEET_ID, TUBOS_SHEET_RANGE, 0,6,8,14, TUBOS_CHANNEL_ID);
           return void await interaction.editReply('✅ Tubos enviado.');
@@ -435,7 +419,7 @@ client.on('interactionCreate', async interaction => {
           return void await interaction.editReply('✅ Fisio enviado.');
         case 'all':
           await sendDepartment();
-          await sendGeneric('Actividades Pocharia', POCHARIA_SHEET_ID, POCHARIA_SHEET_RANGE, 0,6,8,14, POCHARIA_CHANNEL_ID);
+          await sendGeneric('Actividades Notaría', NOTARIA_SHEET_ID, NOTARIA_SHEET_RANGE, 0,6,8,14, NOTARIA_CHANNEL_ID);
           await sendGeneric('Actividades Tubos',    TUBOS_SHEET_ID,   TUBOS_SHEET_RANGE,   0,6,8,14, TUBOS_CHANNEL_ID);
           await sendGeneric('Actividades Fisio',    FISIO_SHEET_ID,   FISIO_SHEET_RANGE,   0,8,10,16, FISIO_CHANNEL_ID);
           return void await interaction.editReply('✅ Todas las secciones enviadas.');
@@ -454,14 +438,14 @@ client.on('interactionCreate', async interaction => {
   }
 
   // ——— /pending ———
-  if (interaction.commandName === 'pending') {
+  if (interaction.commandName === 'misactividades') {
     await interaction.deferReply({ ephemeral: true });
     try {
       await sendMyPending(interaction);
-      await interaction.editReply('✅ Te envié tus pendientes por DM.');
+      await interaction.editReply('✅ Te envié tus actividades por DM.');
     } catch (err) {
       console.error(err);
-      await interaction.editReply('❌ No pude enviar tus pendientes.');
+      await interaction.editReply('❌ No pude enviar tus actividades.');
     }
   }
 });
@@ -476,68 +460,56 @@ client.on('interactionCreate', async interaction => {
  */
 async function sendMyPending(interaction) {
   const userId = interaction.user.id;
-  const lines = [];
+  const lines  = [];
 
-  // —— 1) ACTIVIDADES DE HOY ——
-  lines.push('📋 **Tus actividades para HOY**', '');
+  // — HOY —
+  lines.push('📋 **Tus actividades para HOY**','');
   let hasToday = false;
 
-  // Departamento
-  const { tasksToday: deptToday, tasksPending: deptPending } = await fetchTareas();
+  const { tasksToday: deptToday, tasksPending: deptPending, tasksFuture: deptFuture } = await fetchTareas();
   const myDeptToday = deptToday.filter(t => t.encargadoIds.includes(userId));
   if (myDeptToday.length) {
     hasToday = true;
     lines.push('**Departamento**');
-    myDeptToday.forEach(t => {
-      lines.push(`• ${t.actividad}`);
-    });
+    myDeptToday.forEach(t => lines.push(`• ${t.actividad}`));
     lines.push('');
   }
 
-  // Pocharia, Tubos, Fisio
   const genericConfigs = [
-    ['Pocharia', POCHARIA_SHEET_ID, POCHARIA_SHEET_RANGE, 0,6,8,14],
+    ['Notaría', NOTARIA_SHEET_ID, NOTARIA_SHEET_RANGE, 0,6,8,14],
     ['Tubos',    TUBOS_SHEET_ID,   TUBOS_SHEET_RANGE,   0,6,8,14],
     ['Fisio',    FISIO_SHEET_ID,   FISIO_SHEET_RANGE,   0,8,10,16],
   ];
-  for (const [title, sid, range, colAct, colEnc, colDate, colStatus] of genericConfigs) {
-    const { today: genToday } = await fetchTasks(sid, range, colAct, colEnc, colDate, colStatus);
+  for (const [title, sid, range, ca, ce, cd, cs] of genericConfigs) {
+    const { today: genToday } = await fetchTasks(sid, range, ca, ce, cd, cs);
     const mineToday = genToday.filter(t => t.ids.includes(userId));
     if (mineToday.length) {
       hasToday = true;
       lines.push(`**${title}**`);
-      mineToday.forEach(t => {
-        lines.push(`• ${t.actividad}`);
-      });
+      mineToday.forEach(t => lines.push(`• ${t.actividad}`));
       lines.push('');
     }
   }
 
-  if (!hasToday) {
-    lines.push('✅ No tienes actividades para hoy.', '');
-  }
+  if (!hasToday) lines.push('✅ No tienes actividades para hoy.','');
 
-  // —— 2) ACTIVIDADES PENDIENTES ——
-  lines.push('⌛ **Tus actividades PENDIENTES**', '');
+  // — PENDIENTES —
+  lines.push('⌛ **Tus actividades PENDIENTES**','');
   let hasPending = false;
 
-  // Departamento pendientes
-  if (deptPending.length) {
-    const myDeptPending = deptPending.filter(t => t.encargadoIds.includes(userId));
-    if (myDeptPending.length) {
-      hasPending = true;
-      lines.push('**Departamento**');
-      myDeptPending.forEach(t => {
-        const fecha = t.fecha.toLocaleDateString('es-MX');
-        lines.push(`• [${fecha}] ${t.actividad}`);
-      });
-      lines.push('');
-    }
+  const myDeptPend = deptPending.filter(t => t.encargadoIds.includes(userId));
+  if (myDeptPend.length) {
+    hasPending = true;
+    lines.push('**Departamento**');
+    myDeptPend.forEach(t => {
+      const fecha = t.fecha.toLocaleDateString('es-MX');
+      lines.push(`• [${fecha}] ${t.actividad}`);
+    });
+    lines.push('');
   }
 
-  // Genéricos pendientes
-  for (const [title, sid, range, colAct, colEnc, colDate, colStatus] of genericConfigs) {
-    const { pending: genPend } = await fetchTasks(sid, range, colAct, colEnc, colDate, colStatus);
+  for (const [title, sid, range, ca, ce, cd, cs] of genericConfigs) {
+    const { pending: genPend } = await fetchTasks(sid, range, ca, ce, cd, cs);
     const minePend = genPend.filter(t => t.ids.includes(userId));
     if (minePend.length) {
       hasPending = true;
@@ -550,11 +522,40 @@ async function sendMyPending(interaction) {
     }
   }
 
-  if (!hasPending) {
-    lines.push('✅ ¡No tienes actividades pendientes!');
+  if (!hasPending) lines.push('✅ ¡No tienes actividades pendientes!','');
+
+  // — FUTURAS —
+  lines.push('🤖 **Tus actividades FUTURAS**','');
+  let hasFuture = false;
+
+  const myDeptFuture = deptFuture.filter(t => t.encargadoIds.includes(userId));
+  if (myDeptFuture.length) {
+    hasFuture = true;
+    lines.push('**Departamento**');
+    myDeptFuture.forEach(t => {
+      const fecha = t.fecha.toLocaleDateString('es-MX');
+      lines.push(`• [${fecha}] ${t.actividad}`);
+    });
+    lines.push('');
   }
 
-  // —— 3) Envío por DM ——
+  for (const [title, sid, range, ca, ce, cd, cs] of genericConfigs) {
+    const { future: genFuture } = await fetchTasks(sid, range, ca, ce, cd, cs);
+    const mineFuture = genFuture.filter(t => t.ids.includes(userId));
+    if (mineFuture.length) {
+      hasFuture = true;
+      lines.push(`**${title}**`);
+      mineFuture.forEach(t => {
+        const fecha = t.fecha.toLocaleDateString('es-MX');
+        lines.push(`• [${fecha}] ${t.actividad}`);
+      });
+      lines.push('');
+    }
+  }
+
+  if (!hasFuture) lines.push('✅ No tienes actividades en el futuro.');
+
+  // — Enviar DM —
   await interaction.user.send(lines.join('\n'));
 }
 
