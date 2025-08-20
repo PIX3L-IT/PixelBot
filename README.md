@@ -1,6 +1,6 @@
 # PixelBot
 
-PixelBot is a Discord bot that integrates with Google Sheets to post daily or pending activities in channels or direct messages. User–Discord mappings are configured in mappings.json.
+PixelBot is a Discord bot that integrates with Google Sheets to post daily or pending activities in channels or direct messages. User–Discord mappings should be configured in a mappings.json file.
 
 ## Requirements
 - Node.js 18+
